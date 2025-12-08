@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Lock, Upload, FileSpreadsheet, Check, Download, RefreshCw, Calendar, FileText, Eye } from 'lucide-react';
+import { Lock, Upload, FileSpreadsheet, Check, Download, RefreshCw, Calendar, FileText, Eye, Loader2 } from 'lucide-react';
 
 export default function Admin() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -143,7 +143,7 @@ export default function Admin() {
                             </div>
                         </div>
                         
-                        {/* כפתור הצפייה שביקשת */}
+                         {/* כפתור הצפייה  */}
                         <button 
                             onClick={downloadCurrent} 
                             className="bg-white text-blue-700 px-5 py-2.5 rounded-lg border border-blue-200 hover:bg-blue-600 hover:text-white font-bold shadow-sm flex items-center gap-2 transition"
