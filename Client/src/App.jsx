@@ -279,15 +279,30 @@ function App() {
   const handleFileUpload = async (event, debtId) => {
     const file = event.target.files[0];
     if (!file) return;
+    
+    // בדיקה שיש לנו מידע על התלמידה
+    if (!studentData || !studentData.studentId) {
+        alert("שגיאה: חסר מזהה תלמידה. נסי לרענן ולהתחבר מחדש.");
+        return;
+    }
+
     setUploadingId(debtId);
+    
     const formData = new FormData();
     formData.append('file', file);
     formData.append('debtId', debtId);
     
+    // --- התיקון הקריטי: הוספת מזהה התלמידה לבקשה ---
+    formData.append('studentId', studentData.studentId); // <--- זה מה שהיה חסר!
+    
     try {
-      await axios.post('http://localhost:5219/api/submission/upload', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+      await axios.post('http://localhost:5219/api/submission/upload', formData, { 
+          headers: { 'Content-Type': 'multipart/form-data' } 
+      });
+      
       alert("הקובץ הועלה בהצלחה!");
       
+      // (המשך הקוד נשאר אותו דבר בדיוק...)
       if (studentData) {
           const newDebts = studentData.debts.map(d => {
               const id = getVal(d, 'debtID', 'DebtID');
@@ -300,7 +315,12 @@ function App() {
               return prev;
           });
       }
-    } catch (e) { alert("שגיאה בהעלאה"); } finally { setUploadingId(null); }
+    } catch (e) { 
+        console.error(e);
+        alert("שגיאה בהעלאה: " + (e.response?.data || e.message)); 
+    } finally { 
+        setUploadingId(null); 
+    }
   };
 
   const handleOpenPayment = (debtsToPay, amount) => {

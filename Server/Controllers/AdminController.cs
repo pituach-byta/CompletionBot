@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using OfficeOpenXml; 
 using CompletionBot.Server.Services;
 using Dapper;
+using System.Drawing; // נדרש עבור צבע הקישור באקסל
 
 namespace CompletionBot.Server.Controllers
 {
@@ -57,7 +58,23 @@ namespace CompletionBot.Server.Controllers
             return File(fileBytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "Current_Debts.xlsx");
         }
 
-        // --- 3. העלאה וסנכרון חכם ---
+        // --- 3. (חדש!) הורדת קובץ הגשה ספציפי ---
+        // הפונקציה הזו תקבל את שם הקובץ מהקישור באקסל ותוריד אותו
+        [HttpGet("download-submission/{fileName}")]
+        public IActionResult DownloadSubmissionFile(string fileName)
+        {
+            var uploadsFolder = Path.Combine(_env.ContentRootPath, "BotUploads");
+            var filePath = Path.Combine(uploadsFolder, fileName);
+
+            if (!System.IO.File.Exists(filePath)) 
+                return NotFound("הקובץ לא נמצא בשרת (אולי נמחק ידנית?)");
+
+            var fileBytes = System.IO.File.ReadAllBytes(filePath);
+            // החזרת הקובץ להורדה
+            return File(fileBytes, "application/octet-stream", fileName);
+        }
+
+        // --- 4. העלאה וסנכרון חכם ---
         [HttpPost("upload-excel")]
         public async Task<IActionResult> UploadExcel(IFormFile file)
         {
@@ -65,7 +82,6 @@ namespace CompletionBot.Server.Controllers
 
             try
             {
-                // א. שמירת הקובץ הפיזי בשרת (לצורך צפייה עתידית)
                 var dataFolder = Path.Combine(_env.ContentRootPath, "Data");
                 if (!Directory.Exists(dataFolder)) Directory.CreateDirectory(dataFolder);
                 
@@ -75,7 +91,6 @@ namespace CompletionBot.Server.Controllers
                     await file.CopyToAsync(stream);
                 }
 
-                // ב. ביצוע הסנכרון מול המסד
                 using (var package = new ExcelPackage(new FileInfo(filePath)))
                 {
                     var worksheet = package.Workbook.Worksheets[0];
@@ -83,12 +98,10 @@ namespace CompletionBot.Server.Controllers
 
                     using var connection = _dbService.CreateConnection();
                     connection.Open();
-                    using var transaction = connection.BeginTransaction(); // עבודה בטרנזקציה לביטחון
+                    using var transaction = connection.BeginTransaction();
 
                     try 
                     {
-                        // שלב 1: סימון כל החובות כ"לא פעילים" זמנית
-                        // מי שלא יופיע בקובץ החדש - יישאר לא פעיל ולא יופיע בבוט
                         await connection.ExecuteAsync("UPDATE StudentDebts SET IsActive = 0", transaction: transaction);
 
                         for (int row = 2; row <= rowCount; row++)
@@ -96,7 +109,6 @@ namespace CompletionBot.Server.Controllers
                             var studentId = worksheet.Cells[row, 2].Value?.ToString()?.Trim();
                             if (string.IsNullOrEmpty(studentId)) continue;
 
-                            // קריאת נתונים
                             var yearGroup = worksheet.Cells[row, 1].Value?.ToString();
                             var lastName = worksheet.Cells[row, 3].Value?.ToString();
                             var firstName = worksheet.Cells[row, 4].Value?.ToString();
@@ -111,7 +123,6 @@ namespace CompletionBot.Server.Controllers
                             var domainType = worksheet.Cells[row, 13].Value?.ToString();
                             var materialLink = worksheet.Cells[row, 15].Value?.ToString();
 
-                            // עדכון פרטי תלמידה (או יצירה אם חדשה)
                             var upsertStudent = @"
                                 IF NOT EXISTS (SELECT 1 FROM Students WHERE StudentID = @StudentID)
                                     INSERT INTO Students (StudentID, FirstName, LastName, YearGroup, StudentGroup) 
@@ -123,17 +134,13 @@ namespace CompletionBot.Server.Controllers
                             
                             await connection.ExecuteAsync(upsertStudent, new { StudentID = studentId, FirstName = firstName, LastName = lastName, YearGroup = yearGroup, StudentGroup = studentGroup }, transaction: transaction);
 
-                            // עדכון חוב (סנכרון)
-                            // הלוגיקה: בודקים לפי ת"ז + שם קורס + מספר שיעור.
-                            // אם קיים -> מעדכנים פרטים ומחזירים ל-Active=1.
-                            // אם לא קיים -> יוצרים חדש עם Active=1.
                             var upsertDebt = @"
                                 MERGE INTO StudentDebts AS Target
                                 USING (VALUES (@StudentID, @LessonName, @LessonNumber)) AS Source (StudentID, LessonName, LessonNumber)
                                 ON Target.StudentID = Source.StudentID AND Target.LessonName = Source.LessonName AND Target.LessonNumber = Source.LessonNumber
                                 WHEN MATCHED THEN
                                     UPDATE SET 
-                                        IsActive = 1, -- מחזירים לחיים
+                                        IsActive = 1,
                                         LessonType = @LessonType,
                                         Hours = @Hours,
                                         LecturerName = @LecturerName,
@@ -171,23 +178,73 @@ namespace CompletionBot.Server.Controllers
             catch (Exception ex) { return StatusCode(500, "שגיאה: " + ex.Message); }
         }
         
-        // (הפונקציה הקודמת של ייצוא דוח נשארת ללא שינוי)
+        // --- 5. (משודרג!) ייצוא דוח היסטוריית הגשות מלא עם קישורים ---
         [HttpGet("export-submissions")]
         public async Task<IActionResult> ExportSubmissions()
         {
-             using var connection = _dbService.CreateConnection();
-             var sql = @"SELECT s.FirstName, s.LastName, s.StudentID, d.LessonName, d.LessonType, d.LecturerName, d.LastUpdated as SubmissionDate FROM StudentDebts d JOIN Students s ON d.StudentID = s.StudentID WHERE d.IsSubmitted = 1 ORDER BY d.LastUpdated DESC";
-             var submissions = await connection.QueryAsync(sql);
-             using (var package = new ExcelPackage()) {
-                var sheet = package.Workbook.Worksheets.Add("הגשות");
-                sheet.Cells[1, 1].Value = "שם פרטי"; sheet.Cells[1, 2].Value = "שם משפחה"; sheet.Cells[1, 3].Value = "ת\"ז"; sheet.Cells[1, 4].Value = "קורס"; sheet.Cells[1, 5].Value = "תאריך";
+            using var connection = _dbService.CreateConnection();
+            
+            var sql = @"
+                SELECT 
+                    s.FirstName, 
+                    s.LastName, 
+                    s.StudentID, 
+                    sub.UploadDate,
+                    d.LessonName, 
+                    d.LessonNumber, 
+                    sub.FilePath -- זה שם הקובץ הייחודי בשרת
+                FROM Submissions sub
+                JOIN StudentDebts d ON sub.DebtID = d.DebtID
+                JOIN Students s ON d.StudentID = s.StudentID
+                ORDER BY sub.UploadDate DESC";
+
+            var submissions = await connection.QueryAsync(sql);
+
+            // בניית הכתובת הבסיסית של השרת כדי ליצור לינק תקין
+            // דוגמה: http://localhost:5219/api/admin/download-submission/
+            var baseUrl = $"{Request.Scheme}://{Request.Host}/api/admin/download-submission/";
+
+            using (var package = new ExcelPackage())
+            {
+                var sheet = package.Workbook.Worksheets.Add("היסטוריית הגשות");
+
+                sheet.Cells[1, 1].Value = "שם תלמידה";
+                sheet.Cells[1, 2].Value = "תעודת זהות";
+                sheet.Cells[1, 3].Value = "תאריך ושעה";
+                sheet.Cells[1, 4].Value = "שם שיעור";
+                sheet.Cells[1, 5].Value = "מספר שיעור";
+                sheet.Cells[1, 6].Value = "קובץ העבודה";
+
                 int r = 2;
-                foreach(var sub in submissions) {
-                    sheet.Cells[r, 1].Value = sub.FirstName; sheet.Cells[r, 2].Value = sub.LastName; sheet.Cells[r, 3].Value = sub.StudentID; sheet.Cells[r, 4].Value = sub.LessonName; sheet.Cells[r, 5].Value = sub.SubmissionDate.ToString();
+                foreach (var sub in submissions)
+                {
+                    sheet.Cells[r, 1].Value = $"{sub.FirstName} {sub.LastName}";
+                    sheet.Cells[r, 2].Value = sub.StudentID;
+                    sheet.Cells[r, 3].Value = sub.UploadDate.ToString("dd/MM/yyyy HH:mm");
+                    sheet.Cells[r, 4].Value = sub.LessonName;
+                    sheet.Cells[r, 5].Value = sub.LessonNumber;
+
+                    // יצירת הקישור החכם
+                    if (!string.IsNullOrEmpty(sub.FilePath))
+                    {
+                        var downloadUrl = baseUrl + sub.FilePath;
+                        
+                        sheet.Cells[r, 6].Formula = $"HYPERLINK(\"{downloadUrl}\", \"📥 להורדת הקובץ לחצי כאן\")";
+                        sheet.Cells[r, 6].Style.Font.Color.SetColor(Color.Blue);
+                        sheet.Cells[r, 6].Style.Font.UnderLine = true;
+                    }
+                    else
+                    {
+                        sheet.Cells[r, 6].Value = "אין קובץ";
+                    }
+
                     r++;
                 }
-                return File(package.GetAsByteArray(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "Report.xlsx");
-             }
+
+                sheet.Cells.AutoFitColumns();
+
+                return File(package.GetAsByteArray(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "FullSubmissionsReport.xlsx");
+            }
         }
     }
 }

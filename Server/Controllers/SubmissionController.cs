@@ -1,6 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using CompletionBot.Server.Services;
-using CompletionBot.Server.Models;
+using Dapper;
 
 namespace CompletionBot.Server.Controllers
 {
@@ -9,7 +9,7 @@ namespace CompletionBot.Server.Controllers
     public class SubmissionController : ControllerBase
     {
         private readonly DbService _dbService;
-        private readonly IWebHostEnvironment _env; // שימוש בסביבת הריצה לנתיבים מדויקים
+        private readonly IWebHostEnvironment _env;
 
         public SubmissionController(DbService dbService, IWebHostEnvironment env)
         {
@@ -18,58 +18,63 @@ namespace CompletionBot.Server.Controllers
         }
 
         [HttpPost("upload")]
-        public async Task<IActionResult> UploadFile([FromForm] int debtId, [FromForm] IFormFile file)
+        public async Task<IActionResult> UploadFile([FromForm] IFormFile file, [FromForm] int debtId, [FromForm] string studentId)
         {
-            // 1. בדיקות תקינות בסיסיות לקובץ
             if (file == null || file.Length == 0)
-                return BadRequest("לא נבחר קובץ.");
-
-            // בדיקת סיומת קובץ - תומך במסמכים ותמונות
-            var ext = Path.GetExtension(file.FileName).ToLower();
-            var allowedExtensions = new[] { ".pdf", ".docx", ".doc", ".jpg", ".png", ".jpeg" };
-            
-            if (!allowedExtensions.Contains(ext))
-                return BadRequest($"סוג קובץ לא נתמך ({ext}). יש להעלות PDF או Word.");
+                return BadRequest("לא נבחר קובץ");
 
             try
             {
-                // 2. יצירת נתיב שמירה בטוח (Absolute Path)
-                // התיקייה תיווצר בתוך התיקייה של הפרויקט: Server/BotUploads
-                var uploadFolder = Path.Combine(_env.ContentRootPath, "BotUploads");
-                
-                if (!Directory.Exists(uploadFolder))
-                {
-                    Console.WriteLine($"Creating folder: {uploadFolder}");
-                    Directory.CreateDirectory(uploadFolder);
-                }
+                // 1. שמירת הקובץ הפיזי בשרת
+                var uploadsFolder = Path.Combine(_env.ContentRootPath, "BotUploads");
+                if (!Directory.Exists(uploadsFolder)) Directory.CreateDirectory(uploadsFolder);
 
-                // 3. יצירת שם קובץ ייחודי (מונע דריסת קבצים קודמים אם מעלים שוב)
-                var uniqueFileName = $"{DateTime.Now:yyyyMMdd_HHmmss}_{Guid.NewGuid().ToString().Substring(0,8)}{ext}";
-                var fullPath = Path.Combine(uploadFolder, uniqueFileName);
+                // יצירת שם קובץ ייחודי
+                var uniqueFileName = $"{DateTime.Now:yyyyMMdd_HHmmss}_{Path.GetFileName(file.FileName)}";
+                var filePath = Path.Combine(uploadsFolder, uniqueFileName);
 
-                Console.WriteLine($"Saving submission for DebtID {debtId} to: {fullPath}");
-
-                // 4. שמירת הקובץ פיזית בדיסק
-                using (var stream = new FileStream(fullPath, FileMode.Create))
+                using (var stream = new FileStream(filePath, FileMode.Create))
                 {
                     await file.CopyToAsync(stream);
                 }
 
-                // 5. עדכון סטטוס "הוגש" (IsSubmitted) בנפרד מסטטוס "שולם" (IsPaid)
-                // הפעולה הזו לא נוגעת בסטטוס התשלום, כך שהתלמידה יכולה להגיש עבודה
-                // גם אם שילמה מזמן, וגם אם היא מעלה תיקון לעבודה קיימת.
-                await _dbService.MarkDebtAsSubmittedAsync(debtId);
+                // 2. עדכון מסד הנתונים
+                using var connection = _dbService.CreateConnection();
+                connection.Open();
+                using var transaction = connection.BeginTransaction();
 
-                return Ok(new { 
-                    message = "הקובץ הועלה וההגשה נקלטה בהצלחה", 
-                    fileName = uniqueFileName,
-                    status = "Submitted" // אינדיקציה ללקוח שהסטטוס השתנה
-                });
+                try
+                {
+                    // א. עדכון הטבלה הרגילה (בשביל הבוט)
+                    var updateDebtSql = "UPDATE StudentDebts SET IsSubmitted = 1, LastUpdated = GETDATE() WHERE DebtID = @DebtID";
+                    await connection.ExecuteAsync(updateDebtSql, new { DebtID = debtId }, transaction);
+
+                    // ב. הוספת שורה לטבלת ההיסטוריה (בשביל הדוח!!)
+                    // זה החלק שהיה חסר או לא התעדכן בגלל הנעילה
+                    var insertHistorySql = @"
+                        INSERT INTO Submissions (DebtID, StudentID, UploadDate, FilePath, FileName)
+                        VALUES (@DebtID, @StudentID, GETDATE(), @FilePath, @FileName)";
+
+                    await connection.ExecuteAsync(insertHistorySql, new { 
+                        DebtID = debtId, 
+                        StudentID = studentId, 
+                        FilePath = uniqueFileName, 
+                        FileName = file.FileName 
+                    }, transaction);
+
+                    transaction.Commit();
+                }
+                catch (Exception)
+                {
+                    transaction.Rollback();
+                    throw;
+                }
+
+                return Ok("הקובץ הועלה וההגשה תועדה בהצלחה");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Upload Error: {ex.Message}");
-                return StatusCode(500, $"שגיאה בשמירת הקובץ בשרת: {ex.Message}");
+                return StatusCode(500, "שגיאה בהעלאת הקובץ: " + ex.Message);
             }
         }
     }

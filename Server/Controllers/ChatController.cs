@@ -44,21 +44,56 @@ namespace CompletionBot.Server.Controllers
                     if (!debts.Any())
                     {
                         return Ok(new BotResponse { 
-                            Reply = $"שלום {student.FirstName}. שמח לבשר שאין לך חובות פתוחים במערכת.",
+                            Reply = $"שלום {student.FirstName}. איזה כיף לבשר לך שאין לך חובות פתוחים במערכת! הכל הושלם בהצלחה.",
                             StudentId = student.StudentID
                         });
                     }
 
-                    // בניית המידע המלא ללקוח
-                    var debtsData = debts.Select(d => new {
-                        d.DebtID,
-                        d.LessonName,
-                        d.LessonType,
-                        d.LecturerName,
-                        d.IsPaid,
-                        d.IsSubmitted,
-                        d.MaterialLink,
-                        d.Hours, // חובה להעביר את השעות לחישוב ה-300
+                    // --- כאן מתחיל השדרוג ה"אנושי" ---
+                    
+                    // 1. מיון החובות לקבוצות
+                    var submitted = debts.Where(d => d.IsSubmitted).ToList(); // עבודות שהושלמו
+                    var paidNotSubmitted = debts.Where(d => d.IsPaid && !d.IsSubmitted).ToList(); // שולם אך טרם הוגש
+                    var unpaid = debts.Where(d => !d.IsPaid).ToList(); // לא שולם
+
+                    // 2. בניית הודעה אישית בגוף נקבה
+                    var sb = new StringBuilder();
+                    sb.Append($"שלום לך {student.FirstName}, אני שמחה שחזרת אלי. ");
+
+                    // תרחיש: יש דברים שכבר הסתיימו
+                    if (submitted.Any())
+                    {
+                        // לוקחים רק את ה-2 האחרונות לדוגמה כדי לא להעמיס
+                        var courseNames = string.Join(", ", submitted.Take(2).Select(d => d.LessonName));
+                        var moreText = submitted.Count > 2 ? " ועוד..." : "";
+                        sb.Append($"ראיתי שכבר השלמת בהצלחה את העבודות בקורסים: {courseNames}{moreText}. כל הכבוד! ");
+                    }
+
+                    // תרחיש: שילמה אבל לא הגישה (הכי חשוב להזכיר לה)
+                    if (paidNotSubmitted.Any())
+                    {
+                        sb.Append("\n\n"); // ירידת שורה
+                        sb.Append($"בפעם האחרונה ביצעת תשלום עבור {paidNotSubmitted.Count} קורסים, וכעת נותר לך רק להעלות את קבצי העבודות.");
+                    }
+                    // תרחיש: לא שילמה
+                    else if (unpaid.Any())
+                    {
+                        sb.Append("\n\n");
+                        sb.Append($"נותרו לך {unpaid.Count} חובות שטרם הוסדרו. יש לבצע תשלום כדי לקבל את חומרי הלמידה.");
+                    }
+
+                    sb.Append("\nהנה רשימת המטלות שנשארו לך לטיפול:");
+
+                    // 3. סינון הנתונים ללקוח
+                    // נציג בטבלה קודם את מה שדחוף (לא הוגש), ואת מה שכבר הוגש נשים בסוף או נסנן אם תרצי
+                    var sortedDebts = debts
+                    .Where(d => !d.IsSubmitted)  // <--- מסנן החוצה את מה שכבר הוגש
+                    .OrderBy(d => d.IsPaid)      // ממיין: קודם מה שלא שולם
+                    .ToList();
+
+                    // המרת הנתונים לפורמט שהלקוח מבין
+                    var debtsData = sortedDebts.Select(d => new {
+                        d.DebtID, d.LessonName, d.LessonType, d.LecturerName, d.IsPaid, d.IsSubmitted, d.MaterialLink, d.Hours,
                         StudentID = student.StudentID,
                         FirstName = student.FirstName,
                         LastName = student.LastName
@@ -66,34 +101,33 @@ namespace CompletionBot.Server.Controllers
 
                     return Ok(new BotResponse 
                     { 
-                        Reply = $"שלום {student.FirstName}, זוהית בהצלחה. נמצאו {debts.Count()} חובות במערכת.",
+                        Reply = sb.ToString(), // ההודעה האנושית שבנינו
                         StudentId = student.StudentID,
-                        ActionType = "ShowDebts",
+                        ActionType = unpaid.Any() ? "ShowDebts" : "UploadFile", // אם יש חוב כספי - מציג תשלום, אחרת ישר העלאה
                         Data = debtsData
                     });
                 }
 
-                // --- שלב ב: שיחה רגילה ---
+                // --- שלב ב: שיחה רגילה (נשאר ללא שינוי, רק מוודאים שעובד) ---
                 var currentStudent = await _dbService.GetStudentByIdAsync(request.StudentId);
                 if (currentStudent == null) return Unauthorized("שגיאת זיהוי: תלמידה לא נמצאה");
 
                 var currentDebts = await _dbService.GetDebtsByStudentIdAsync(request.StudentId);
                 
-                var responseData = currentDebts.Select(d => new {
+                var responseData = currentDebts.OrderBy(d => d.IsSubmitted).Select(d => new {
                     d.DebtID, d.LessonName, d.LessonType, d.LecturerName, d.IsPaid, d.IsSubmitted, d.MaterialLink, d.Hours,
                     StudentID = currentStudent.StudentID,
                     FirstName = currentStudent.FirstName,
                     LastName = currentStudent.LastName
                 });
 
-                // בודקים אם נשאר משהו לשלם
                 var hasUnpaid = currentDebts.Any(d => !d.IsPaid);
 
                 if (hasUnpaid)
                 {
                     return Ok(new BotResponse 
                     { 
-                        Reply = "יש להסדיר את התשלום עבור כל החובות שטרם שולמו.",
+                        Reply = "כדי להתקדם, יש להסדיר את התשלום עבור החובות המסומנים באדום למטה.",
                         StudentId = request.StudentId,
                         ActionType = "ShowDebts",
                         Data = responseData
@@ -103,7 +137,7 @@ namespace CompletionBot.Server.Controllers
                 {
                     return Ok(new BotResponse 
                     { 
-                        Reply = "התשלום התקבל בהצלחה! כעת ניתן להוריד את החומרים ולהגיש את העבודות (עד מכסת השעות).",
+                        Reply = "התשלום נקלט בהצלחה! כל האפשרויות פתוחות בפניך: ניתן להוריד את החומרים ולהעלות את העבודות כעת.",
                         StudentId = request.StudentId,
                         ActionType = "UploadFile",
                         Data = responseData
