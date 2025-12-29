@@ -26,19 +26,23 @@ namespace CompletionBot.Server.Models
         public bool IsPaid { get; set; }
         public string? TransactionId { get; set; } 
         public bool IsSubmitted { get; set; }
+        
+        public bool IsExempt { get; set; } 
         public bool IsActive { get; set; } 
         public DateTime LastUpdated { get; set; }
+
+        // --- הוספנו את השורה הזו שתקלוט את הנתון מהשאילתה ---
+        public DateTime? UploadDate { get; set; } 
+        // ---------------------------------------------------
     }
 
     public class Submission
     {
         public int SubmissionID { get; set; }
         public int DebtID { get; set; }
-        public DateTime UploadDate { get; set; }
+        public DateTime? UploadDate { get; set; }
         public string? FilePath { get; set; } 
     }
-
-    // --- המודלים שהיו חסרים לך וגרמו לשגיאה ---
 
     public class ChatRequest
     {
@@ -48,9 +52,9 @@ namespace CompletionBot.Server.Models
 
     public class BotResponse
     {
-        public string Reply { get; set; } = ""; // הטקסט שהבוט אומר
-        public string ActionType { get; set; } = "None"; // סוג הפעולה: None, ShowDebts, UploadFile
-        public object? Data { get; set; } // המידע הרלוונטי (למשל רשימת החובות)
-        public string? StudentId { get; set; } // כדי שהלקוח ישמור את הזיהוי
+        public string Reply { get; set; } = ""; 
+        public string ActionType { get; set; } = "None"; 
+        public object? Data { get; set; } 
+        public string? StudentId { get; set; } 
     }
 }

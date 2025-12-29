@@ -1,6 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
 using CompletionBot.Server.Services;
-using CompletionBot.Server.Models;
 
 namespace CompletionBot.Server.Controllers
 {
@@ -9,7 +8,7 @@ namespace CompletionBot.Server.Controllers
     public class SubmissionController : ControllerBase
     {
         private readonly DbService _dbService;
-        private readonly IWebHostEnvironment _env; // שימוש בסביבת הריצה לנתיבים מדויקים
+        private readonly IWebHostEnvironment _env;
 
         public SubmissionController(DbService dbService, IWebHostEnvironment env)
         {
@@ -18,58 +17,58 @@ namespace CompletionBot.Server.Controllers
         }
 
         [HttpPost("upload")]
-        public async Task<IActionResult> UploadFile([FromForm] int debtId, [FromForm] IFormFile file)
+        public async Task<IActionResult> UploadWork(
+            [FromForm] string studentId, 
+            [FromForm] int debtId, 
+            [FromForm] List<IFormFile> files) 
         {
-            // 1. בדיקות תקינות בסיסיות לקובץ
-            if (file == null || file.Length == 0)
-                return BadRequest("לא נבחר קובץ.");
-
-            // בדיקת סיומת קובץ - תומך במסמכים ותמונות
-            var ext = Path.GetExtension(file.FileName).ToLower();
-            var allowedExtensions = new[] { ".pdf", ".docx", ".doc", ".jpg", ".png", ".jpeg" };
-            
-            if (!allowedExtensions.Contains(ext))
-                return BadRequest($"סוג קובץ לא נתמך ({ext}). יש להעלות PDF או Word.");
+            if (string.IsNullOrEmpty(studentId) || debtId == 0 || files == null || files.Count == 0)
+                return BadRequest("נתונים חסרים");
 
             try
             {
-                // 2. יצירת נתיב שמירה בטוח (Absolute Path)
-                // התיקייה תיווצר בתוך התיקייה של הפרויקט: Server/BotUploads
-                var uploadFolder = Path.Combine(_env.ContentRootPath, "BotUploads");
+                var student = await _dbService.GetStudentByIdAsync(studentId);
+                if (student == null) return NotFound("תלמידה לא נמצאה");
+
+                var uploadsPath = Path.Combine(_env.ContentRootPath, "BotUploads");
+                if (!Directory.Exists(uploadsPath)) Directory.CreateDirectory(uploadsPath);
+
+                var uploadedLinks = new List<string>();
+
+                foreach (var file in files)
+                {
+                    if (file.Length > 0)
+                    {
+                        // יצירת שם קובץ באנגלית בלבד (ת"ז + קוד חוב + מזהה ייחודי)
+                        var extension = Path.GetExtension(file.FileName).ToLower();
+                        var uniqueId = Guid.NewGuid().ToString().Substring(0, 8); 
+                        var safeFileName = $"{studentId}_{debtId}_{uniqueId}{extension}";
+                        
+                        var filePath = Path.Combine(uploadsPath, safeFileName);
+
+                        using (var stream = new FileStream(filePath, FileMode.Create))
+                        {
+                            await file.CopyToAsync(stream);
+                        }
+
+                        // יצירת הקישור המלא
+                        string fileLink = $"{Request.Scheme}://{Request.Host}/api/admin/download/{safeFileName}";
+                        uploadedLinks.Add(fileLink);
+                    }
+                }
+
+                // חיבור כל הקישורים למחרוזת אחת
+                string finalLinksString = string.Join(" , ", uploadedLinks);
                 
-                if (!Directory.Exists(uploadFolder))
-                {
-                    Console.WriteLine($"Creating folder: {uploadFolder}");
-                    Directory.CreateDirectory(uploadFolder);
-                }
+                // קריאה לפונקציה המעודכנת ב-DbService (עם StudentID)
+                await _dbService.SaveSubmissionAsync(debtId, studentId, finalLinksString);
 
-                // 3. יצירת שם קובץ ייחודי (מונע דריסת קבצים קודמים אם מעלים שוב)
-                var uniqueFileName = $"{DateTime.Now:yyyyMMdd_HHmmss}_{Guid.NewGuid().ToString().Substring(0,8)}{ext}";
-                var fullPath = Path.Combine(uploadFolder, uniqueFileName);
-
-                Console.WriteLine($"Saving submission for DebtID {debtId} to: {fullPath}");
-
-                // 4. שמירת הקובץ פיזית בדיסק
-                using (var stream = new FileStream(fullPath, FileMode.Create))
-                {
-                    await file.CopyToAsync(stream);
-                }
-
-                // 5. עדכון סטטוס "הוגש" (IsSubmitted) בנפרד מסטטוס "שולם" (IsPaid)
-                // הפעולה הזו לא נוגעת בסטטוס התשלום, כך שהתלמידה יכולה להגיש עבודה
-                // גם אם שילמה מזמן, וגם אם היא מעלה תיקון לעבודה קיימת.
-                await _dbService.MarkDebtAsSubmittedAsync(debtId);
-
-                return Ok(new { 
-                    message = "הקובץ הועלה וההגשה נקלטה בהצלחה", 
-                    fileName = uniqueFileName,
-                    status = "Submitted" // אינדיקציה ללקוח שהסטטוס השתנה
-                });
+                return Ok(new { message = "העבודה הוגשה בהצלחה" });
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Upload Error: {ex.Message}");
-                return StatusCode(500, $"שגיאה בשמירת הקובץ בשרת: {ex.Message}");
+                Console.WriteLine($"Error: {ex.Message}");
+                return StatusCode(500, $"שגיאה בהעלאה: {ex.Message}");
             }
         }
     }
