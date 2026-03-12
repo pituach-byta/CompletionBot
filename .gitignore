@@ -1,0 +1,14 @@
+# התעלמות מתיקיות בילד והרצה
+[Bb]in/
+[Oo]bj/
+Server/publish/
+
+# התעלמות מקבצי העלאות של המערכת (הבלאגן מקודם)
+Server/BotUploads/
+*.docx
+*.xlsx
+*.html
+
+# קבצי הגדרות אישיים של VS Code
+.vs/
+.vscode/

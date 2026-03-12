@@ -1,0 +1,7 @@
+
+@CompletionBot.Server_HostAddress = http://auto-office.byta.org.il/
+
+GET {{CompletionBot.Server_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
