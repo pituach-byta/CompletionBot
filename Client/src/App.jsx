@@ -11,7 +11,7 @@ const getVal = (obj, key1, key2) => {
 };
 
 // בראש הקובץ App.js
-const API_BASE_URL = "https://auto-office.byta.org.il";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:5219";
 
 const getIsInstructionsOnly = (debt) => {
   const link = (getVal(debt, 'materialLink', 'MaterialLink') || "").trim();

@@ -9,7 +9,7 @@ export default function Admin() {
   const [msg, setMsg] = useState('');
   const [currentFile, setCurrentFile] = useState(null);
 
-  const API_BASE_URL = "https://auto-office.byta.org.il";
+  const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:5219";
 
   // פונקציה לטעינת מידע על הקובץ הקיים בשרת
   const fetchFileInfo = async () => {

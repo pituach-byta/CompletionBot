@@ -16,7 +16,11 @@ builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowAll",
         policy => policy
-            .WithOrigins("https://auto-office.byta.org.il") // הדומיין שלך
+            .WithOrigins(
+                "https://auto-office.byta.org.il",
+                "http://localhost:5173",
+                "https://localhost:5173"
+            )
             .AllowAnyMethod()
             .AllowAnyHeader()
             .AllowCredentials());
