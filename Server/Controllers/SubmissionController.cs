@@ -1,5 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using CompletionBot.Server.Services;
+using System.Linq;
+using System.Collections.Generic;
 
 namespace CompletionBot.Server.Controllers
 {

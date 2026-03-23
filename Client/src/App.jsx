@@ -13,14 +13,7 @@ const getVal = (obj, key1, key2) => {
 // בראש הקובץ App.js
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:5219";
 
-const getIsInstructionsOnly = (debt) => {
-  const link = (getVal(debt, 'materialLink', 'MaterialLink') || "").trim();
-  // בודקים אם יש תוכן אבל הוא לא כתובת אינטרנט
-  const isUrl = link.toLowerCase().startsWith('http') || link.toLowerCase().startsWith('www');
-  return link !== "" && !isUrl;
-};
-
-const PaymentIframe = ({ totalAmount, onSuccess, onClose, debtsToPay }) => {
+const PaymentIframe = ({ totalAmount, onSuccess, onClose, debtsToPay, student }) => {
   const iframeRef = useRef(null);
   const [status, setStatus] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -92,6 +85,15 @@ const PaymentIframe = ({ totalAmount, onSuccess, onClose, debtsToPay }) => {
       return;
     }
 
+    // ✅ בדיקה חשובה: אנחנו צריכים DebtIDs כדי עדכן את DB אחרי התשלום!
+    console.log("📋 Param1Value:", param1Value);
+    console.log("📊 debtsToPay:", JSON.stringify(debtsToPay, null, 2));
+    
+    if (!param1Value || param1Value.trim() === '') {
+      setStatus('שגיאה: לא נמצאו קורסים לתשלום. אנא רענן את העמוד ונסה שוב.');
+      return;
+    }
+
     setIsSubmitting(true);
     setStatus('מעבד תשלום, אנא המתן/י...');
 
@@ -120,7 +122,9 @@ const PaymentIframe = ({ totalAmount, onSuccess, onClose, debtsToPay }) => {
       }
     };
 
-    console.log("🚀 Sending to iframe:", JSON.stringify(dataToNedarim, null, 2));
+    console.log("🚀 Sending to Nedarim iframe:", JSON.stringify(dataToNedarim, null, 2));
+    console.log("✅ Param1 (DebtIDs):", param1Value);
+    console.log("✅ CallBack URL:", 'https://auto-office.byta.org.il/api/Payment/callback');
 
     if (iframeRef.current && iframeRef.current.contentWindow) {
       iframeRef.current.contentWindow.postMessage(dataToNedarim, '*');
@@ -166,6 +170,9 @@ const PaymentIframe = ({ totalAmount, onSuccess, onClose, debtsToPay }) => {
     return () => window.removeEventListener('message', handleMessage);
   }, [onSuccess]);
 
+  // בדיקת סביבת פיתוח (localhost או 127.0.0.1)
+  const isDev = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+
   return (
     <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-[9999] p-4" style={{ direction: 'rtl' }}>
       <div className="bg-white w-full max-w-3xl rounded-xl shadow-2xl flex flex-col max-h-[95vh] overflow-hidden">
@@ -185,12 +192,70 @@ const PaymentIframe = ({ totalAmount, onSuccess, onClose, debtsToPay }) => {
         </div>
 
         <div className="flex-1 overflow-y-auto p-6 bg-gray-50">
-            
+          {/* כפתור דילוג על תשלום - רק בפיתוח */}
+          {isDev && (
+            <button
+              onClick={async () => {
+                setIsSubmitting(true);
+                setStatus('מעדכן את מסד הנתונים...');
+                try {
+                  const studentId = student?.StudentID || student?.studentID;
+                  // עדכן את כל הקורסים שצריכים תשלום (debtsToPay הם הקורסים שנשלחו לתשלום)
+                  const debtIdsList = debtsToPay
+                    .map(d => d.DebtID || d.debtID || d.id)
+                    .filter(id => id)
+                    .join(',');
+                  
+                  console.log('🔧 Dev-bypass: student object:', JSON.stringify(student, null, 2));
+                  console.log('🔧 Dev-bypass: studentId:', studentId);
+                  console.log('🔧 Dev-bypass: debtsToPay:', JSON.stringify(debtsToPay, null, 2));
+                  console.log('🔧 Dev-bypass: DebtIds:', debtIdsList);
+                  
+                  // ✅ בדיקה: אם אין studentId או debtIds, אל תשלח בקשה
+                  if (!studentId) {
+                    setStatus('❌ שגיאה: לא נמצא מספר זהות של התלמידה');
+                    setIsSubmitting(false);
+                    return;
+                  }
+                  
+                  if (!debtIdsList) {
+                    setStatus('❌ שגיאה: לא נמצאו קורסים לעדכון');
+                    setIsSubmitting(false);
+                    return;
+                  }
+                  
+                  const response = await axios.post(
+                    `${API_BASE_URL}/api/payment/dev-mark-paid?studentId=${encodeURIComponent(studentId)}&debtIds=${encodeURIComponent(debtIdsList)}`
+                  );
+                  
+                  console.log('✅ Dev-bypass response:', response.data);
+                  
+                  if (response.data.success) {
+                    console.log('✅ Dev-bypass: DB updated successfully', response.data);
+                    setStatus('✅ מסד הנתונים עודכן בהצלחה!');
+                    if (onSuccess) setTimeout(() => onSuccess('dev-bypass-' + Date.now()), 1000);
+                  } else {
+                    setStatus('❌ שגיאה בעדכון מסד הנתונים');
+                  }
+                } catch (error) {
+                  console.error('❌ Dev-bypass error:', error);
+                  console.error('❌ Error response:', error.response?.data);
+                  setStatus('❌ שגיאה: ' + (error.response?.data?.error || error.message));
+                } finally {
+                  setIsSubmitting(false);
+                }
+              }}
+              className="mb-4 w-full py-2 rounded-lg bg-yellow-400 hover:bg-yellow-500 text-black font-bold text-lg shadow border border-yellow-600 transition-all"
+              disabled={isSubmitting}
+            >
+              דלג על תשלום (פיתוח)
+            </button>
+          )}
+
           <div className="mb-6 bg-white p-4 rounded-lg shadow-sm border border-gray-100">
             <h4 className="font-bold text-gray-700 mb-4 flex items-center gap-2">
               <User size={18} /> פרטים אישיים
             </h4>
-            
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -215,7 +280,6 @@ const PaymentIframe = ({ totalAmount, onSuccess, onClose, debtsToPay }) => {
                   disabled={isSubmitting}
                 />
               </div>
-              
               {/* --- השינוי החשוב בשדה תעודת זהות --- */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -232,7 +296,6 @@ const PaymentIframe = ({ totalAmount, onSuccess, onClose, debtsToPay }) => {
                 />
               </div>
               {/* --------------------------------------- */}
-
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   טלפון <span className="text-red-500">*</span>
@@ -247,7 +310,6 @@ const PaymentIframe = ({ totalAmount, onSuccess, onClose, debtsToPay }) => {
                   placeholder="05xxxxxxxx"
                 />
               </div>
-
               {maxTashlumim > 1 && (
                 <div>
                    {/* ... (שאר קוד התשלומים נשאר אותו דבר) */}
@@ -267,7 +329,6 @@ const PaymentIframe = ({ totalAmount, onSuccess, onClose, debtsToPay }) => {
                 </div>
               )}
             </div>
-
             <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
                {/* ... (שאר השדות: עיר, רחוב, אימייל - ללא שינוי) ... */}
                <div>
@@ -284,7 +345,6 @@ const PaymentIframe = ({ totalAmount, onSuccess, onClose, debtsToPay }) => {
               </div>
             </div>
           </div>
-
           <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-100 mb-4">
              {/* ... (האייפרם נשאר אותו דבר) ... */}
              <h4 className="font-bold text-gray-700 mb-2 flex items-center gap-2">
@@ -299,7 +359,6 @@ const PaymentIframe = ({ totalAmount, onSuccess, onClose, debtsToPay }) => {
                allow="payment; fullscreen"
              />
           </div>
-
           {status && (
             <div className={`p-3 rounded mb-4 text-center font-bold ${
               status.includes('הצלחה') ? 'bg-green-100 text-green-700' : 
@@ -309,7 +368,6 @@ const PaymentIframe = ({ totalAmount, onSuccess, onClose, debtsToPay }) => {
               {status}
             </div>
           )}
-
           <button 
             onClick={handlePayment}
             disabled={isSubmitting}
@@ -330,28 +388,29 @@ const PaymentIframe = ({ totalAmount, onSuccess, onClose, debtsToPay }) => {
 /// --- רכיב 2: רשימת החובות (גרסה מתוקנת וסופית) ---
 const DebtsList = ({ debts, onPay, onUpload, uploadingId }) => {
   
-  // 1. פונקציית עזר לזיהוי "הוראות בלבד"
-  const getIsInstructionsOnly = (debt) => {
-    const link = (getVal(debt, 'materialLink', 'MaterialLink') || "").trim();
-    const isUrl = link.toLowerCase().startsWith('http') || link.toLowerCase().startsWith('www');
-    return link !== "" && !isUrl;
-  };
-
-  // 2. יצירת רשימה ממוינת לפי DebtID (זה מה שהיה חסר וגרם לשגיאה!)
+  // 1. יצירת רשימה ממוינת לפי DebtID
   const sortedDebts = [...debts].sort((a, b) => {
     const idA = parseInt(getVal(a, 'debtID', 'DebtID')) || 0;
     const idB = parseInt(getVal(b, 'debtID', 'DebtID')) || 0;
     return idA - idB;
   });
 
-  // 3. סינון הקורסים להצגה (רק מה שהשרת אישר ואינו פטור)
+  // 2. סינון הקורסים להצגה - כל קורס שמאושר להגשה לפי חישוב מכסת 300 השעות
   const visibleDebts = sortedDebts.filter(debt => {
     const isAllowedFromServer = getVal(debt, 'isAllowedSubmission', 'IsAllowedSubmission');
-    const isExempt = getVal(debt, 'isExempt', 'IsExempt');
-    return isAllowedFromServer === true && !isExempt;
+    return isAllowedFromServer === true;
+  });
+  
+  console.log("🔎 DebtsList Debug:");
+  console.log("  sortedDebts:", sortedDebts.length);
+  console.log("  visibleDebts:", visibleDebts.length);
+  sortedDebts.forEach((d, i) => {
+    const isPaid = getVal(d, 'isPaid', 'IsPaid');
+    const isExempt = getVal(d, 'isExempt', 'IsExempt');
+    console.log(`  [${i}] ${getVal(d, 'lessonName', 'LessonName')} - isPaid: ${isPaid}, isExempt: ${isExempt}`);
   });
 
-  // 4. בדיקה האם יש חובות שטרם שולמו
+  // 3. בדיקה האם יש חובות שטרם שולמו - תשלום הוא עבור כל הקורסים
   const unpaidDebts = sortedDebts.filter(d => !getVal(d, 'isPaid', 'IsPaid'));
 
   // --- תצוגת "נעול" אם יש חובות שלא שולמו ---
@@ -362,15 +421,30 @@ const DebtsList = ({ debts, onPay, onUpload, uploadingId }) => {
           <Lock size={18} className="text-red-500" />
           <span>הקורסים נעולים. <span className="text-green-600 font-bold">התשלום יפתח מיד</span> את האפשרות להגשה.</span>
         </h4>
-        <ul className="space-y-2">
-          {sortedDebts.map((debt, idx) => (
-            <li key={idx} className="text-gray-600 text-sm flex items-center gap-2">
-              <span className="w-1.5 h-1.5 bg-gray-400 rounded-full"></span>
-              {getVal(debt, 'lessonName', 'LessonName')}
-              <span className="text-gray-400 text-xs">({getVal(debt, 'lessonType', 'LessonType')})</span>
-            </li>
-          ))}
-        </ul>
+        <table className="w-full text-sm text-gray-600 border-collapse">
+          <thead>
+            <tr className="border-b-2 border-gray-400">
+              <th className="text-right py-2 px-2 font-bold text-gray-800">שם שיעור</th>
+              <th className="text-left py-2 px-2 font-bold text-gray-800">סכום לתשלום</th>
+            </tr>
+          </thead>
+          <tbody>
+            {unpaidDebts.map((debt, idx) => (
+              <tr key={idx} className="border-b border-gray-200 hover:bg-gray-50 transition">
+                <td className="py-3 px-2">
+                  <div className="flex items-center gap-2">
+                    <span className="w-1.5 h-1.5 bg-gray-400 rounded-full shrink-0"></span>
+                    <span>{getVal(debt, 'lessonName', 'LessonName')}</span>
+                    <span className="text-gray-400 text-xs">({getVal(debt, 'lessonType', 'LessonType')})</span>
+                  </div>
+                </td>
+                <td className="py-3 px-2 text-left">
+                  <span className="font-semibold text-orange-700">{getVal(debt, 'price', 'Price') || 50} ₪</span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     );
   }
@@ -396,7 +470,7 @@ const DebtsList = ({ debts, onPay, onUpload, uploadingId }) => {
         const hours = getVal(debt, 'hours', 'Hours') || 0;
         const type = getVal(debt, 'lessonType', 'LessonType') || '';
         
-        const isInstructionsOnly = getIsInstructionsOnly(debt);
+        const isInstructionsOnly = getVal(debt, 'isInstructionsOnly', 'IsInstructionsOnly');
         const isUrl = link.startsWith('http') || link.startsWith('www');
         const isClassroom = getVal(debt, 'displayType', 'DisplayType') === 'Classroom';
 
@@ -485,7 +559,20 @@ const DebtsList = ({ debts, onPay, onUpload, uploadingId }) => {
                        </div>
                      )}
                   </div>
-                ) : null}
+                ) : (
+                  // ברירת מחדל: קורס ללא קישור ספציפי - אפשרות העלאת קובץ
+                  !isSubmitted ? (
+                    <label className={`w-full flex justify-center items-center gap-2 py-2.5 rounded-lg text-sm font-bold cursor-pointer shadow-sm transition ${uploadingId === debtId ? 'bg-gray-300' : 'bg-blue-600 text-white hover:bg-blue-700'}`}>
+                      {uploadingId === debtId ? <Loader2 className="animate-spin" size={18} /> : <Upload size={18} />}
+                      {uploadingId === debtId ? "מעלה..." : "העלאת עבודה"}
+                      <input type="file" className="hidden" multiple onChange={(e) => onUpload(e.target.files, debtId)} />
+                    </label>
+                  ) : (
+                    <div className="mt-1 w-full bg-green-50/50 border border-green-100 text-green-700 py-2 rounded-lg text-sm font-medium flex justify-center items-center gap-2">
+                      <Check size={16} /> העבודה הוגשה בהצלחה
+                    </div>
+                  )
+                )}
               </div>
             </div>
           </div>
@@ -535,22 +622,23 @@ function App() {
       const data = response.data;
 
       let finalStudentId = data.studentId || data.StudentId;
-      let fName = studentData?.firstName || '';
-      let lName = studentData?.lastName || '';
+      let fName = studentData?.firstName || data.firstName || data.FirstName || '';
+      let lName = studentData?.lastName || data.lastName || data.LastName || '';
       if (data.data && Array.isArray(data.data) && data.data.length > 0) {
         const first = data.data[0];
         if (!finalStudentId) finalStudentId = first.StudentID || first.studentID;
-        fName = first.FirstName || first.firstName || fName;
-        lName = first.LastName || first.lastName || lName;
+        fName = fName || first.FirstName || first.firstName || '';
+        lName = lName || first.LastName || first.lastName || '';
       }
 
       if (finalStudentId) {
-        setStudentData({
+        setStudentData(prev => ({
           studentId: finalStudentId,
           firstName: fName,
           lastName: lName,
-          debts: data.data || []
-        });
+          // שמירת החובות הקיימים אם התגובה הנוכחית לא מכילה נתונים (שיחה רגילה)
+          debts: data.data ?? (prev?.debts ?? [])
+        }));
       }
       setMessages(prev => [...prev, { role: 'bot', text: data.reply, actionType: data.actionType, data: data.data }]);
     } catch (error) {
@@ -606,21 +694,59 @@ function App() {
     setPaymentModal({ amount, student, debts: debtsToPay });
   };
 
-  const onPaymentSuccess = (transId) => {
-    // 1. שומרים את רשימת החובות ששולמו לפני שסוגרים את המודל
+  const onPaymentSuccess = async (transId) => {
+    // 1. שומרים את רשימת החובות ששולמו ופרטי התשלום לפני שסוגרים את המודל
     const debtsToPay = paymentModal.debts;
+    const paymentAmount = paymentModal.amount;
+    console.log("💳 תשלום בוצע! קורסים ששולמו:", debtsToPay.length);
     
     // 2. סוגרים את חלונית התשלום
     setPaymentModal(null);
 
     // 3. עדכון הסטטוס בתוך ה-State של הלקוח (כדי שהתצוגה תשתנה מיד)
     if (studentData) {
+      console.log("📊 סהכל קורסים בנתונים:", studentData.debts.length);
+      
       const newDebts = studentData.debts.map(d => {
         const id = getVal(d, 'debtID', 'DebtID');
         // אם החוב הנוכחי היה ברשימת התשלום, נסמן אותו כ"שולם"
         const wasInPayList = debtsToPay.some(pd => getVal(pd, 'debtID', 'DebtID') === id);
         return wasInPayList ? { ...d, IsPaid: true, isPaid: true } : d;
       });
+
+      console.log("✅ קורסים אחרי עדכון:", newDebts.length);
+      console.log("🔍 קורסים עם isPaid=true:", newDebts.filter(d => getVal(d, 'isPaid', 'IsPaid')).length);
+
+      // ✅ שליחת מייל עם קבלה למזכירות
+      try {
+        const receiptPayload = {
+          studentId: studentData.studentId,
+          studentName: `${studentData.firstName} ${studentData.lastName}`, // שם מלא לתאימות
+          firstName: studentData.firstName,
+          lastName: studentData.lastName,
+          amount: paymentAmount,
+          debts: debtsToPay.map(d => ({
+            lessonName: getVal(d, 'lessonName', 'LessonName'),
+            lessonType: getVal(d, 'lessonType', 'LessonType'),
+            price: getVal(d, 'price', 'Price') || 50,
+            lessonNumber: getVal(d, 'lessonNumber', 'LessonNumber')
+          }))
+        };
+
+        console.log("📧 שולח קבלה למזכירות:", receiptPayload);
+        
+        await axios.post(
+          `${API_BASE_URL}/api/payment/send-receipt`,
+          receiptPayload
+        );
+        
+        console.log("✅ הקבלה נשלחה בהצלחה לתיבת המזכירות!");
+      } catch (emailError) {
+        console.error("⚠️ שגיאה בשליחת הקבלה:", emailError.message);
+        console.error("📋 Status:", emailError.response?.status);
+        console.error("📋 Response Data:", emailError.response?.data);
+        console.error("📋 Full Error:", emailError);
+      }
 
       // מעדכנים את נתוני התלמידה בזיכרון של הדפדפן
       setStudentData({ ...studentData, debts: newDebts });
@@ -671,16 +797,12 @@ const successMsg = `<div style="line-height: 1.4; color: #374151;">
         <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-white/50 scrollbar-thin scrollbar-thumb-gray-200 pb-24">
           {messages.map((m, i) => {
             const unpaidList = m.data ? m.data.filter(d => !getVal(d, 'isPaid', 'IsPaid')) : [];
+
             const totalToPay = unpaidList.reduce((sum, d) => {
-  // בודקים את סוג השיעור/עבודה
-  const type = getVal(d, 'lessonType', 'LessonType') || "";
-  
-  // קביעת מחיר לפי סוג: עבודה מעשית ב-600, כל השאר ב-50
-  const currentPrice = (type === "עבודה מעשית") ? 600 : 50;
-  
-  return sum + currentPrice;
-}, 0); 
-                       const isLastBotMessage = m.role === 'bot' && i === messages.length - 1;
+              const currentPrice = getVal(d, 'price', 'Price') || 50;
+              return sum + Number(currentPrice);
+            }, 0);
+            const isLastBotMessage = m.role === 'bot' && i === messages.length - 1;
 
             return (
               <div key={i} ref={isLastBotMessage ? lastBotMessageRef : null} className={`flex flex-col ${m.role === 'user' ? 'items-end' : 'items-start'} animate-in fade-in slide-in-from-bottom-2 duration-300`}>
@@ -695,7 +817,9 @@ const successMsg = `<div style="line-height: 1.4; color: #374151;">
                     </div>
                   )}
 
-                  {m.data && <DebtsList debts={m.data} onPay={handleOpenPayment} onUpload={handleFileUpload} uploadingId={uploadingId} />}
+                  {m.actionType === 'ShowDebts' && m.data && <DebtsList debts={m.data} onPay={handleOpenPayment} onUpload={handleFileUpload} uploadingId={uploadingId} />}
+
+                  {m.actionType === 'UploadFile' && m.data && isLastBotMessage && <DebtsList debts={studentData?.debts || m.data} onPay={handleOpenPayment} onUpload={handleFileUpload} uploadingId={uploadingId} />}
                 </div>
               </div>
             );

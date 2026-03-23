@@ -96,7 +96,7 @@ public async Task<IActionResult> SendMessage([FromBody] ChatRequest request)
         if (!isInitialLogin && request.UserMessage.Trim().All(char.IsDigit) && request.UserMessage.Length >= 8)
             return Ok(new BotResponse { Reply = "אני רואה שאת כבר מחוברת. לרענון, טעני את הדף מחדש.", StudentId = studentIdToUse, ActionType = "None" });
 
-        // 2. לוגיקת הסינון (נשאר ללא שינוי)
+        // 2. לוגיקת הסינון
         var allDebtsRaw = await _dbService.GetStudentDebtsFullDetailsAsync(studentIdToUse);
         var uniqueDebts = allDebtsRaw.GroupBy(d => (int)d.DebtID).Select(g => g.First()).ToList();
         var activePlanDebts = FilterDebtsLogic(uniqueDebts);
@@ -108,15 +108,39 @@ public async Task<IActionResult> SendMessage([FromBody] ChatRequest request)
                 return !(r.ContainsKey("IsPaid") && IsTrue(r["IsPaid"])) && 
                        !(r.ContainsKey("IsExempt") && IsTrue(r["IsExempt"]));
             })
-            .Sum(d => (decimal)GetLessonPrice(SafeConvertToDictionary(d)["LessonType"]?.ToString() ?? ""));
+            .Sum(d => {
+                var r = SafeConvertToDictionary(d);
+                return (decimal)GetLessonPrice(
+                    r["LessonType"]?.ToString() ?? "",
+                    r.ContainsKey("LessonName") ? r["LessonName"]?.ToString() ?? "" : "");
+            });
 
-        // בדיקת סיום חובות (נשאר ללא שינוי)
+        // בדיקת סיום חובות
+        // קורסים שיש להם רק הוראות לא מעכבים
+        // ONLY קורסים שהם "מתוקשב"/"מודרכת" וחרגו מהמכסה לא מעכבים
         bool allObligationsMet = activePlanDebts.All(d =>
         {
             var r = SafeConvertToDictionary(d);
+            bool isInstructionsOnly = r.ContainsKey("IsInstructionsOnly") && IsTrue(r["IsInstructionsOnly"]);
+            
+            // אם זה הוראות בלבד - לא מעכב
+            if (isInstructionsOnly)
+                return true;
+            
+            // בדוק אם זה קורס "מתוקשב"/"מודרכת" שחרג מהמכסה
+            string type = r.ContainsKey("LessonType") ? (r["LessonType"]?.ToString() ?? "") : "";
+            bool isCapLimitedType = type.Contains("מתוקשב") || type.Contains("מודרכת");
+            bool isAllowedSubmission = !r.ContainsKey("IsAllowedSubmission") || IsTrue(r["IsAllowedSubmission"]);
+            
+            // אם זה קורס "מתוקשב"/"מודרכת" שחרג מהמכסה - לא מעכב
+            if (isCapLimitedType && !isAllowedSubmission)
+                return true;
+            
+            // כל קורס אחר: צריך להיות משולם והוגש (או פטור ידני)
             bool p = r.ContainsKey("IsPaid") && IsTrue(r["IsPaid"]);
             bool s = r.ContainsKey("IsSubmitted") && IsTrue(r["IsSubmitted"]);
             bool exempt = r.ContainsKey("IsExempt") && IsTrue(r["IsExempt"]);
+            
             return (p && s) || exempt;
         });
 
@@ -136,7 +160,7 @@ public async Task<IActionResult> SendMessage([FromBody] ChatRequest request)
             string materialLink = row.ContainsKey("MaterialLink") ? (row["MaterialLink"]?.ToString() ?? "") : "";
             string lessonType = row.ContainsKey("LessonType") ? (row["LessonType"]?.ToString() ?? "") : "";
 
-            // לוגיקה לקביעת סוג התצוגה (החזרתי את המקור שלך בדיוק)
+            // לוגיקת קביעת סוג התצוגה
             string displayType = "Regular";
             bool isUrl = materialLink.StartsWith("http") || materialLink.StartsWith("www");
             
@@ -149,6 +173,11 @@ public async Task<IActionResult> SendMessage([FromBody] ChatRequest request)
             {
                 displayType = "Classroom";
             }
+            else if (!isUrl && string.IsNullOrEmpty(materialLink))
+            {
+                // קורסים ללא קישור שאינם בקטגוריה מוגדרת - ברירת מחדל: העלאת קובץ
+                displayType = "Classroom";
+            }
 
             return new
             {
@@ -156,16 +185,17 @@ public async Task<IActionResult> SendMessage([FromBody] ChatRequest request)
                 StudentID = studentIdToUse,
                 LessonName = row.ContainsKey("LessonName") ? row["LessonName"] : "",
                 LessonType = lessonType,
+                LessonNumber = row.ContainsKey("LessonNumber") ? row["LessonNumber"] : 0,
                 LecturerName = row.ContainsKey("LecturerName") ? row["LecturerName"] : "",
                 MaterialLink = materialLink,
                 IsPaid = row.ContainsKey("IsPaid") && IsTrue(row["IsPaid"]),
                 IsSubmitted = row.ContainsKey("IsSubmitted") && IsTrue(row["IsSubmitted"]),
                 Hours = hoursVal,
-                IsExempt = false,
+                IsExempt = row.ContainsKey("IsExempt") && IsTrue(row["IsExempt"]),
                 DisplayType = displayType,
-                Price = GetLessonPrice(lessonType) ,// התוספת היחידה כאן
-                // חפשי את המילה Price = ... והוסיפי אחריה:
-IsAllowedSubmission = row.ContainsKey("IsAllowedSubmission") ? row["IsAllowedSubmission"] : true
+                Price = GetLessonPrice(lessonType, row.ContainsKey("LessonName") ? row["LessonName"]?.ToString() ?? "" : "") ,
+                IsAllowedSubmission = row.ContainsKey("IsAllowedSubmission") ? row["IsAllowedSubmission"] : true,
+                IsInstructionsOnly = row.ContainsKey("IsInstructionsOnly") ? row["IsInstructionsOnly"] : false
             };
         }).ToList();
 
@@ -185,7 +215,7 @@ IsAllowedSubmission = row.ContainsKey("IsAllowedSubmission") ? row["IsAllowedSub
         {
             bool hasUnpaid = debtsData.Any(d => !d.IsPaid);
             string actionType = hasUnpaid ? "ShowDebts" : "UploadFile";
-            return Ok(new BotResponse { Reply = aiReply, StudentId = student.StudentID, ActionType = actionType, Data = debtsData });
+            return Ok(new BotResponse { Reply = aiReply, StudentId = student.StudentID, FirstName = student.FirstName, LastName = student.LastName, ActionType = actionType, Data = debtsData });
         }
         else
         {
@@ -450,6 +480,8 @@ sb.AppendLine("הסבירי לה שעליה לבצע את ההוראות המו�
     {
         Reply = aiReply + buttonHtml,
         StudentId = student.StudentID,
+        FirstName = student.FirstName,
+        LastName = student.LastName,
         ActionType = "None",
         Data = null
     });
@@ -501,7 +533,7 @@ sb.AppendLine("הסבירי לה שעליה לבצע את ההוראות המו�
         {
             statusText = "הושלם";
         }
-        // 3. שלישית: כל מה שפטור (ידני או בגלל מכסה - מתקן את 2301533)
+        // 3. שלישית: כל מה שפטור (ידני או בגלל מכסה )
         else if (isExemptManual || !isAllowed)
         {
             statusText = "פטור מהגשה";
@@ -662,10 +694,12 @@ private async Task SendCertificateEmail(dynamic student, IEnumerable<dynamic> co
     string s = val.ToString()?.ToLower()?.Trim() ?? "";
     return s == "true" || s == "1" || s == "yes";
 }
-        private int GetLessonPrice(string lessonType)
+        private int GetLessonPrice(string lessonType, string lessonName = "")
 {
-    if (string.IsNullOrEmpty(lessonType)) return 1;
-    return lessonType.Contains("עבודה מעשית") ? 600 : 50;
+    if (string.IsNullOrEmpty(lessonType)) return 50;
+    if (lessonType.Contains("עבודה מעשית"))
+        return (lessonName ?? "").Contains("שנה ג") ? 250 : 600;
+    return 50;
 }
     }
 }

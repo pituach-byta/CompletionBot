@@ -138,7 +138,8 @@ public async Task<IActionResult> UploadExcel(IFormFile file)
 
                             if (!hoursTracker.ContainsKey(studentId)) hoursTracker[studentId] = 0;
                             int.TryParse(GetVal(row, "שעות"), out int rowHours);
-                            bool isExempt = (hoursTracker[studentId] >= 300);
+                            // IsExempt צריך להיות תמיד 0 בעת טעינה - הפטור בגלל מכסה מחושב ב-FilterDebtsLogic באמצעות IsAllowedSubmission
+                            bool isExempt = false;
                             hoursTracker[studentId] += rowHours;
 
                             // Upsert Students
