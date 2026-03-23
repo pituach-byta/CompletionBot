@@ -56,6 +56,8 @@ namespace CompletionBot.Server.Models
         public string Reply { get; set; } = ""; 
         public string ActionType { get; set; } = "None"; 
         public object? Data { get; set; } 
-        public string? StudentId { get; set; } 
+        public string? StudentId { get; set; }
+        public string? FirstName { get; set; }
+        public string? LastName { get; set; }
     }
 }

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Lock, Upload, FileSpreadsheet, Check, Download, RefreshCw, Calendar, FileText, Eye, Loader2 } from 'lucide-react';
+import { Lock, Upload, FileSpreadsheet, Check, Download, RefreshCw, Calendar, FileText, Eye, Loader2, User, Search, Trash2, DollarSign, FileCheck } from 'lucide-react';
 
 export default function Admin() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -8,6 +8,10 @@ export default function Admin() {
   const [uploading, setUploading] = useState(false);
   const [msg, setMsg] = useState('');
   const [currentFile, setCurrentFile] = useState(null);
+  const [searchStudentId, setSearchStudentId] = useState('');
+  const [studentDebts, setStudentDebts] = useState(null);
+  const [loadingDebts, setLoadingDebts] = useState(false);
+  const [exemptLoading, setExemptLoading] = useState(null);
 
   const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:5219";
 
@@ -84,6 +88,61 @@ export default function Admin() {
       link.click();
       link.remove();
     } catch (error) { alert('שגיאה בהורדת הדוח'); }
+  };
+
+  // ===== פונקציות ניהול חריגים =====
+  
+  const handleSearchStudent = async () => {
+    if (!searchStudentId.trim()) {
+      alert('אנא הכנס ת.ז של תלמידה');
+      return;
+    }
+
+    setLoadingDebts(true);
+    try {
+      const res = await axios.get(`${API_BASE_URL}/api/admin/student-debts/${searchStudentId}`);
+      setStudentDebts(res.data);
+    } catch (error) {
+      alert('תלמידה לא נמצאה או שגיאה בשרת');
+      setStudentDebts(null);
+    } finally {
+      setLoadingDebts(false);
+    }
+  };
+
+  const handleExempt = async (debtId, action) => {
+    let confirmMsg = '';
+    
+    if (action === 'remove-debt') {
+      confirmMsg = '⚠️ זה ימחק את הקורס לגמרי מהמסד נתונים!\nהאם אתה בטוח/בטוחה?';
+    } else if (action === 'exempt-completely') {
+      confirmMsg = 'זה יסמן את הקורס כפטור מלא (תשלום + הגשה).\nהקורס יישאר בבסיס הנתונים.\nהאם להמשיך?';
+    } else {
+      confirmMsg = 'האם אתה בטוח/בטוחה?';
+    }
+    
+    if (!window.confirm(confirmMsg)) return;
+
+    setExemptLoading(debtId);
+    try {
+      const url = `${API_BASE_URL}/api/admin/${action}/${debtId}`;
+      await axios.post(url);
+      
+      // שדרוג קטן של הודעה
+      const actionText = action === 'remove-debt' ? '🗑️ קורס נמחק לגמרי' : 
+                         action === 'exempt-payment' ? '✓ פטור מתשלום' :
+                         action === 'exempt-submission' ? '✓ פטור מהגשה' :
+                         '✓ פטור מלא';
+      
+      setMsg(`${actionText}`);
+      
+      // שדרוג רשימה
+      await handleSearchStudent();
+    } catch (error) {
+      alert('שגיאה בביצוע הפעולה: ' + error.response?.data?.message);
+    } finally {
+      setExemptLoading(null);
+    }
   };
 
   // --- מסך התחברות ---
@@ -212,6 +271,138 @@ export default function Admin() {
                     <Download size={20}/>
                     הורדת דוח הגשות (Excel)
                 </button>
+            </div>
+
+            {/* 4. כרטיס ניהול חריגים חדש! */}
+            <div className="bg-white p-6 rounded-2xl shadow-sm border border-purple-200 bg-gradient-to-br from-purple-50 to-white">
+                <h3 className="text-xl font-bold mb-4 flex items-center gap-2 text-purple-900">
+                    <User className="text-purple-600"/>
+                    ניהול חריגים - פטורים והסרות
+                </h3>
+                
+                {/* טופס חיפוש */}
+                <div className="flex flex-col sm:flex-row gap-3 mb-6">
+                    <input 
+                        type="text" 
+                        placeholder="הכנס ת.ז של תלמידה..."
+                        className="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 text-right"
+                        value={searchStudentId}
+                        onChange={e => setSearchStudentId(e.target.value)}
+                        onKeyPress={e => e.key === 'Enter' && handleSearchStudent()}
+                        dir="rtl"
+                    />
+                    <button 
+                        onClick={handleSearchStudent}
+                        disabled={loadingDebts}
+                        className="bg-purple-600 hover:bg-purple-700 disabled:bg-gray-400 text-white px-6 py-3 rounded-lg font-bold flex items-center justify-center gap-2 transition"
+                    >
+                        {loadingDebts ? <Loader2 className="animate-spin" size={20}/> : <Search size={20}/>}
+                        חיפוש
+                    </button>
+                </div>
+
+                {msg && (
+                    <div className="mb-4 p-4 bg-green-50 text-green-800 rounded-xl flex items-center gap-3 border border-green-200 animate-in fade-in">
+                        <Check size={20}/>
+                        {msg}
+                    </div>
+                )}
+
+                {/* תוצאות חיפוש */}
+                {studentDebts && (
+                    <div className="space-y-4">
+                        <h4 className="font-bold text-gray-800 mb-4">חובות של {searchStudentId}</h4>
+                        {studentDebts.length === 0 ? (
+                            <div className="text-gray-500 italic text-center p-6 bg-gray-50 rounded-lg">
+                                אין חובות להציג
+                            </div>
+                        ) : (
+                            <div className="space-y-3 max-h-96 overflow-y-auto">
+                                {studentDebts.map((debt) => (
+                                    <div key={debt.debtID} className="p-4 border border-gray-200 rounded-lg hover:shadow-md transition">
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+                                            <div>
+                                                <p className="text-sm text-gray-600">שם קורס</p>
+                                                <p className="font-bold text-gray-800">{debt.lessonName}</p>
+                                            </div>
+                                            <div>
+                                                <p className="text-sm text-gray-600">סטטוס</p>
+                                                <p className="font-bold">
+                                                    {debt.isActive ? (
+                                                        <span className="text-orange-600">פעיל</span>
+                                                    ) : (
+                                                        <span className="text-gray-500">אינו פעיל</span>
+                                                    )}
+                                                </p>
+                                            </div>
+                                            <div>
+                                                <p className="text-sm text-gray-600">תשלום</p>
+                                                <p className={debt.isPaid ? "text-green-600 font-bold" : "text-red-600 font-bold"}>
+                                                    {debt.isPaid ? "✓ שולם" : "✗ חוב"}
+                                                </p>
+                                            </div>
+                                            <div>
+                                                <p className="text-sm text-gray-600">הגשה</p>
+                                                <p className={debt.isSubmitted ? "text-green-600 font-bold" : "text-red-600 font-bold"}>
+                                                    {debt.isSubmitted ? "✓ הוגש" : "✗ לא הוגש"}
+                                                </p>
+                                            </div>
+                                        </div>
+
+                                        <div className="flex flex-wrap gap-2 pt-3 border-t border-gray-100">
+                                            {debt.isActive && (
+                                                <>
+                                                    {!debt.isPaid && (
+                                                        <button 
+                                                            onClick={() => handleExempt(debt.debtID, 'exempt-payment')}
+                                                            disabled={exemptLoading === debt.debtID}
+                                                            className="flex-1 min-w-[120px] bg-blue-500 hover:bg-blue-600 disabled:bg-gray-400 text-white px-3 py-2 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition"
+                                                            title="יסמן את הקורס כ'שולם' אך לא יוציא את ההגשה"
+                                                        >
+                                                            {exemptLoading === debt.debtID ? <Loader2 className="animate-spin" size={14}/> : <DollarSign size={14}/>}
+                                                            פטור מתשלום
+                                                        </button>
+                                                    )}
+                                                    {!debt.isSubmitted && (
+                                                        <button 
+                                                            onClick={() => handleExempt(debt.debtID, 'exempt-submission')}
+                                                            disabled={exemptLoading === debt.debtID}
+                                                            className="flex-1 min-w-[120px] bg-cyan-500 hover:bg-cyan-600 disabled:bg-gray-400 text-white px-3 py-2 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition"
+                                                            title="יסמן את הקורס כ'הוגש' אך לא יוציא את התשלום"
+                                                        >
+                                                            {exemptLoading === debt.debtID ? <Loader2 className="animate-spin" size={14}/> : <FileCheck size={14}/>}
+                                                            פטור מהגשה
+                                                        </button>
+                                                    )}
+                                                    {(!debt.isPaid || !debt.isSubmitted) && (
+                                                        <button 
+                                                            onClick={() => handleExempt(debt.debtID, 'exempt-completely')}
+                                                            disabled={exemptLoading === debt.debtID}
+                                                            className="flex-1 min-w-[120px] bg-amber-500 hover:bg-amber-600 disabled:bg-gray-400 text-white px-3 py-2 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition"
+                                                            title="פטור מלא - הקורס יישאר בבסיס הנתונים אך יסומן כ'בוצע'"
+                                                        >
+                                                            {exemptLoading === debt.debtID ? <Loader2 className="animate-spin" size={14}/> : <Check size={14}/>}
+                                                            פטור מלא
+                                                        </button>
+                                                    )}
+                                                    <button 
+                                                        onClick={() => handleExempt(debt.debtID, 'remove-debt')}
+                                                        disabled={exemptLoading === debt.debtID}
+                                                        className="flex-1 min-w-[120px] bg-red-500 hover:bg-red-600 disabled:bg-gray-400 text-white px-3 py-2 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition"
+                                                        title="⚠️ מחיקה לגמרי - הקורס יוסר מהמסד נתונים"
+                                                    >
+                                                        {exemptLoading === debt.debtID ? <Loader2 className="animate-spin" size={14}/> : <Trash2 size={14}/>}
+                                                        הסר קורס
+                                                    </button>
+                                                </>
+                                            )}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                )}
             </div>
         </div>
       </div>

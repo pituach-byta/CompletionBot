@@ -9,6 +9,9 @@ using System.Collections.Generic;
 using System.Data.SqlTypes;
 using System.Net;
 using System.Net.Mail;
+using iTextSharp.text;
+using iTextSharp.text.html.simpleparser;
+using iTextSharp.text.pdf;
 
 namespace CompletionBot.Server.Controllers
 {
@@ -23,6 +26,8 @@ namespace CompletionBot.Server.Controllers
 
         private const int MAX_QUOTA_HOURS = 300; // מכסת שעות רשות
         private const string SUPPORT_EMAIL = "botseminr@byta.org.il";
+        private const string ADDITIONAL_EMAIL_1 = "gila.y@byta.org.il";
+        private const string ADDITIONAL_EMAIL_2 = "admin@byta.org.il";
 
         public ChatController(DbService dbService, IConfiguration config)
         {
@@ -57,13 +62,9 @@ public async Task<IActionResult> DownloadCertificate(string studentId)
         bool isFinished = IsTrue(r["IsPaid"]) && IsTrue(r["IsSubmitted"]);
 
         // חוסמים רק אם זו מטלה רגילה בבוט שטרם בוצעה
+        // קורסים עם הוראות בלבד, דופליקטים (סומנו כ-!IsAllowedSubmission בFilterDebtsLogic), או שעברו מכסה לא מעכבים את קבלת הדו"ח
         return isAllowed && !isExempt && !isInstructionsOnly && !isFinished;
     });
-
-    if (hasPendingRealTasks)
-    {
-        return Content("<div dir='rtl' style='font-family:sans-serif;'>קיימות מטלות שטרם הוגשו בבוט. לא ניתן להפיק אישור עד לסיום העלאת הקבצים ותשלום עבורן.</div>", "text/html");
-    }
 
     // שולחים את planDebts (שכבר מכיל את כל החישובים) לפונקציית ה-HTML
     string htmlContent = GenerateCertificateHtml(student, planDebts);
@@ -127,13 +128,12 @@ public async Task<IActionResult> SendMessage([FromBody] ChatRequest request)
             if (isInstructionsOnly)
                 return true;
             
-            // בדוק אם זה קורס "מתוקשב"/"מודרכת" שחרג מהמכסה
-            string type = r.ContainsKey("LessonType") ? (r["LessonType"]?.ToString() ?? "") : "";
-            bool isCapLimitedType = type.Contains("מתוקשב") || type.Contains("מודרכת");
+            // בדוק אם הקורס עברו מכסה או הוא כפול (IsAllowedSubmission = false)
+            // קורסים עם IsAllowedSubmission = false לא מעכבים את קבלת הדו"ח
             bool isAllowedSubmission = !r.ContainsKey("IsAllowedSubmission") || IsTrue(r["IsAllowedSubmission"]);
             
-            // אם זה קורס "מתוקשב"/"מודרכת" שחרג מהמכסה - לא מעכב
-            if (isCapLimitedType && !isAllowedSubmission)
+            // אם הקורס עברו מכסה או כפול - לא מעכב
+            if (!isAllowedSubmission)
                 return true;
             
             // כל קורס אחר: צריך להיות משולם והוגש (או פטור ידני)
@@ -329,6 +329,26 @@ private List<dynamic> FilterDebtsLogic(IEnumerable<dynamic> allDebts)
         resultList.Add(row);
     }
 
+    // ✅ POST-PROCESSING: קורסים עם אותו MaterialLink - רק הראשון פתוח להגשה, השאר פטורים מהגשה (לא מתשלום!)
+    var seenUrls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var item in resultList)
+    {
+        var itemRow = (Dictionary<string, object?>)item;
+        string linkVal = itemRow.ContainsKey("MaterialLink") ? (itemRow["MaterialLink"]?.ToString() ?? "").Trim() : "";
+        bool isLinkUrl = linkVal.StartsWith("http", StringComparison.OrdinalIgnoreCase) ||
+                         linkVal.StartsWith("www", StringComparison.OrdinalIgnoreCase);
+
+        // רק URL אמיתי, ורק אם הקורס כבר מאושר להגשה (לא נגע בקורסים שכבר false)
+        if (!isLinkUrl || string.IsNullOrEmpty(linkVal)) continue;
+        if (!IsTrue(itemRow.ContainsKey("IsAllowedSubmission") ? itemRow["IsAllowedSubmission"] : null)) continue;
+
+        if (!seenUrls.Add(linkVal))
+        {
+            // קישור כפול - פטור מהגשה בלבד, תשלום נשאר כרגיל!
+            itemRow["IsAllowedSubmission"] = false;
+        }
+    }
+
     return resultList;
 }
        private string BuildSmartSystemPrompt(dynamic student, IEnumerable<dynamic> debts, string userMessage, bool isInitial, decimal totalAmount)
@@ -456,7 +476,7 @@ sb.AppendLine("הסבירי לה שעליה לבצע את ההוראות המו�
 
     // --- התיקון כאן: הוספת await ---
     // במקום: _ = SendCertificateEmail(student, completedDebts);
-    await SendCertificateEmail(student, completedDebts); 
+    await SendCompletionCertificateEmailAsync(student, completedDebts); 
 
     var req = HttpContext.Request;
     string baseUrl = $"{req.Scheme}://{req.Host}";
@@ -550,123 +570,225 @@ sb.AppendLine("הסבירי לה שעליה לבצע את ההוראות המו�
     sb.AppendLine("</table><br><p>מסמך זה מציג את תמונת המצב של החובות הלימודיים נכון לרגע זה.</p></div></body></html>");
     return sb.ToString();
 }
- // *** החליפי את הפונקציה SendCertificateEmail המקורית שלך בקוד הזה ***
 
-private async Task SendCertificateEmail(dynamic student, IEnumerable<dynamic> completedCourses)
-{
-    try
-    {
-        // קריאת הגדרות SMTP
-        var smtpHost = _config["Smtp:Host"];
-        var smtpPortStr = _config["Smtp:Port"];
-        var smtpUser = _config["Smtp:User"];
-        var smtpPass = _config["Smtp:Pass"];
-
-        // לוגים לדיבאג - יעזרו לך לראות אם ההגדרות נקראו נכון
-        Console.WriteLine("=== שליחת מייל - בדיקת הגדרות ===");
-        Console.WriteLine($"Host: {smtpHost ?? "❌ חסר"}");
-        Console.WriteLine($"Port: {smtpPortStr ?? "587 (ברירת מחדל)"}");
-        Console.WriteLine($"User: {smtpUser ?? "❌ חסר"}");
-        Console.WriteLine($"Pass: {(string.IsNullOrEmpty(smtpPass) ? "❌ חסר" : "✓ קיים")}");
-        Console.WriteLine($"נמען: {SUPPORT_EMAIL}");
-        Console.WriteLine($"תלמידה: {student.FirstName} {student.LastName} ({student.StudentID})");
-        Console.WriteLine("=====================================");
-
-        // בדיקה אם כל ההגדרות קיימות
-        if (string.IsNullOrEmpty(smtpHost))
+        private byte[] GenerateCompletionCertificatePdf(dynamic student, IEnumerable<dynamic> completedCourses)
         {
-            Console.WriteLine("❌ שגיאה: SMTP Host חסר ב-appsettings.json!");
-            return;
-        }
-
-        if (string.IsNullOrEmpty(smtpUser))
-        {
-            Console.WriteLine("❌ שגיאה: SMTP User חסר ב-appsettings.json!");
-            return;
-        }
-
-        if (string.IsNullOrEmpty(smtpPass))
-        {
-            Console.WriteLine("❌ שגיאה: SMTP Password חסר ב-appsettings.json!");
-            Console.WriteLine("   לחשבון Google Workspace צריך App Password (16 תווים)");
-            return;
-        }
-
-        // המרת פורט
-        int smtpPort = 587;
-        if (!string.IsNullOrEmpty(smtpPortStr))
-        {
-            if (!int.TryParse(smtpPortStr, out smtpPort))
+            try
             {
-                Console.WriteLine($"⚠️ אזהרה: פורט לא תקין '{smtpPortStr}', משתמש ב-587");
-                smtpPort = 587;
+                using (var ms = new MemoryStream())
+                {
+                    // יצירת דוקומנט PDF
+                    var document = new Document(PageSize.A4, 36, 36, 36, 36);
+                    var writer = PdfWriter.GetInstance(document, ms);
+                    document.Open();
+
+                    // הגדרת פונט לעברית
+                    string fontPath = @"C:\Windows\Fonts\arial.ttf";
+                    BaseFont baseFont = BaseFont.CreateFont(fontPath, BaseFont.IDENTITY_H, BaseFont.EMBEDDED);
+                    Font titleFont = new Font(baseFont, 16, Font.BOLD);
+                    Font headerFont = new Font(baseFont, 12, Font.BOLD);
+                    Font normalFont = new Font(baseFont, 10);
+                    Font smallFont = new Font(baseFont, 9);
+
+                    // כותרת
+                    var titleTable = new PdfPTable(1) { WidthPercentage = 100, RunDirection = PdfWriter.RUN_DIRECTION_RTL };
+                    var titleCell = new PdfPCell(new Phrase("אישור סיום חובות לימודיים", titleFont))
+                    {
+                        HorizontalAlignment = Element.ALIGN_CENTER,
+                        BackgroundColor = new BaseColor(0, 51, 102),
+                        Padding = 10,
+                        RunDirection = PdfWriter.RUN_DIRECTION_RTL
+                    };
+                    titleCell.FixedHeight = 40;
+                    titleTable.AddCell(titleCell);
+                    document.Add(titleTable);
+                    document.Add(new Paragraph("בית המורה - סמינר שצ'רנסקי", headerFont) { Alignment = Element.ALIGN_CENTER });
+                    document.Add(new Paragraph("\n"));
+
+                    // פרטי התלמידה
+                    var p1 = new Paragraph($"שם התלמידה: {student.FirstName} {student.LastName}", headerFont);
+                    p1.Alignment = Element.ALIGN_RIGHT;
+                    document.Add(p1);
+
+                    var p2 = new Paragraph($"תעודת זהות: {student.StudentID}", headerFont);
+                    p2.Alignment = Element.ALIGN_RIGHT;
+                    document.Add(p2);
+
+                    var p3 = new Paragraph($"תאריך: {DateTime.Now:dd/MM/yyyy}", headerFont);
+                    p3.Alignment = Element.ALIGN_RIGHT;
+                    document.Add(p3);
+                    document.Add(new Paragraph("\n"));
+
+                    // כותרת טבלה
+                    var p4 = new Paragraph("פירוט סטטוס קורסים:", headerFont);
+                    p4.Alignment = Element.ALIGN_RIGHT;
+                    document.Add(p4);
+
+                    // טבלה עם הקורסים
+                    var table = new PdfPTable(5) { WidthPercentage = 100, RunDirection = PdfWriter.RUN_DIRECTION_RTL };
+                    table.SetWidths(new float[] { 1.5f, 1.5f, 2f, 2f, 2f });
+
+                    // כותרות עמודות
+                    string[] headers = { "סטטוס", "מרצה", "שם השיעור", "מס' שיעור", "מטרת לימודים" };
+                    foreach (var header in headers)
+                    {
+                        var cell = new PdfPCell(new Phrase(header, headerFont))
+                        {
+                            BackgroundColor = new BaseColor(240, 240, 240),
+                            HorizontalAlignment = Element.ALIGN_CENTER,
+                            Padding = 8,
+                            RunDirection = PdfWriter.RUN_DIRECTION_RTL
+                        };
+                        table.AddCell(cell);
+                    }
+
+                    foreach (var item in completedCourses)
+                    {
+                        var row = SafeConvertToDictionary(item);
+
+                        string lessonNum = row.ContainsKey("LessonNumber") ? row["LessonNumber"]?.ToString() ?? "" : "";
+                        string studyGoal = row.ContainsKey("StudyGoal") ? row["StudyGoal"]?.ToString() ?? "" : "";
+                        string name = row.ContainsKey("LessonName") ? row["LessonName"]?.ToString() ?? "" : "";
+                        string lecturer = row.ContainsKey("LecturerName") ? row["LecturerName"]?.ToString() ?? "" : "";
+
+                        bool isFinished = IsTrue(row["IsPaid"]) && IsTrue(row["IsSubmitted"]);
+                        bool isExemptManual = row.ContainsKey("IsExempt") && IsTrue(row["IsExempt"]);
+                        bool isAllowed = !row.ContainsKey("IsAllowedSubmission") || IsTrue(row["IsAllowedSubmission"]);
+                        bool isInstructionsOnly = row.ContainsKey("IsInstructionsOnly") && IsTrue(row["IsInstructionsOnly"]);
+
+                        string statusText = "";
+                        if (isInstructionsOnly)
+                            statusText = "לא הושלם";
+                        else if (isFinished)
+                            statusText = "הושלם";
+                        else if (isExemptManual || !isAllowed)
+                            statusText = "פטור מהגשה";
+                        else
+                            statusText = "הושלם";
+
+                        table.AddCell(new PdfPCell(new Phrase(statusText, normalFont)) { HorizontalAlignment = Element.ALIGN_RIGHT, RunDirection = PdfWriter.RUN_DIRECTION_RTL });
+                        table.AddCell(new PdfPCell(new Phrase(lecturer, normalFont)) { HorizontalAlignment = Element.ALIGN_RIGHT, RunDirection = PdfWriter.RUN_DIRECTION_RTL });
+                        table.AddCell(new PdfPCell(new Phrase(name, normalFont)) { HorizontalAlignment = Element.ALIGN_RIGHT, RunDirection = PdfWriter.RUN_DIRECTION_RTL });
+                        table.AddCell(new PdfPCell(new Phrase(lessonNum, normalFont)) { HorizontalAlignment = Element.ALIGN_CENTER });
+                        table.AddCell(new PdfPCell(new Phrase(studyGoal, normalFont)) { HorizontalAlignment = Element.ALIGN_RIGHT, RunDirection = PdfWriter.RUN_DIRECTION_RTL });
+                    }
+
+                    document.Add(table);
+                    document.Add(new Paragraph("\n"));
+
+                    var footer = new Paragraph("מסמך זה מציג את תמונת המצב של החובות הלימודיים נכון לרגע זה.", smallFont);
+                    footer.Alignment = Element.ALIGN_RIGHT;
+                    document.Add(footer);
+
+                    var timestamp = new Paragraph($"הודעה זו נוצרה ב: {DateTime.Now:dd/MM/yyyy HH:mm:ss}", smallFont);
+                    timestamp.Alignment = Element.ALIGN_CENTER;
+                    document.Add(timestamp);
+
+                    document.Close();
+                    return ms.ToArray();
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ שגיאה ביצירת PDF: {ex.Message}");
+                Console.WriteLine($"   Stack Trace: {ex.StackTrace}");
+                return new byte[0];
             }
         }
 
-        Console.WriteLine($"📧 מכין מייל עבור {student.FirstName} {student.LastName}...");
-
-        // יצירת תוכן ה-HTML
-        string htmlBody = GenerateCertificateHtml(student, completedCourses);
-
-        // יצירת המייל
-        using (var message = new MailMessage())
+private async Task SendCompletionCertificateEmailAsync(dynamic student, List<dynamic> completedCourses)
         {
-            message.From = new MailAddress(smtpUser, "מערכת הפורטל - בית המורה");
-            message.To.Add(SUPPORT_EMAIL);
-            message.Subject = $"אישור סיום חובות - {student.FirstName} {student.LastName} ({student.StudentID})";
-            message.Body = htmlBody;
-            message.IsBodyHtml = true;
-            message.Priority = MailPriority.High;
-
-            Console.WriteLine($"📤 מתחבר לשרת SMTP: {smtpHost}:{smtpPort}");
-
-            // שליחת המייל
-            using (var client = new SmtpClient(smtpHost, smtpPort))
+            try
             {
-                client.EnableSsl = true;
-                client.Credentials = new NetworkCredential(smtpUser, smtpPass);
-                client.Timeout = 30000; // 30 שניות
-                client.DeliveryMethod = SmtpDeliveryMethod.Network;
+                var smtpHost = _config["Smtp:Host"];
+                var smtpPortStr = _config["Smtp:Port"];
+                var smtpUser = _config["Smtp:User"];
+                var smtpPass = _config["Smtp:Pass"];
 
-                Console.WriteLine("📨 שולח מייל...");
-                await client.SendMailAsync(message);
-                Console.WriteLine("✅ הצלחה! המייל נשלח בהצלחה!");
-                Console.WriteLine($"   מאת: {smtpUser}");
-                Console.WriteLine($"   אל: {SUPPORT_EMAIL}");
-                Console.WriteLine($"   נושא: {message.Subject}");
+                // בדיקה אם כל ההגדרות קיימות
+                if (string.IsNullOrEmpty(smtpHost) || string.IsNullOrEmpty(smtpUser) || string.IsNullOrEmpty(smtpPass))
+                {
+                    Console.WriteLine("❌ שגיאה: הגדרות SMTP חסרות ב-appsettings.json!");
+                    System.IO.File.AppendAllText("C:\\temp\\completion_email_log.txt",
+                        $"{DateTime.Now:dd/MM/yyyy HH:mm:ss}: ❌ SMTP settings missing\n");
+                    return;
+                }
+
+                int smtpPort = 587;
+                if (!string.IsNullOrEmpty(smtpPortStr) && !int.TryParse(smtpPortStr, out smtpPort))
+                {
+                    smtpPort = 587;
+                }
+
+                Console.WriteLine($"🔗 מתחבר לשרת SMTP: {smtpHost}:{smtpPort}");
+
+                using var client = new SmtpClient(smtpHost, smtpPort)
+                {
+                    EnableSsl = true,
+                    Credentials = new NetworkCredential(smtpUser, smtpPass),
+                    Timeout = 30000
+                };
+
+                // קריאת רשימת נמענים מהקונפיגורציה
+                var recipients = _config.GetSection("AdminEmails:Recipients").Get<List<string>>() ?? new List<string>();
+                
+                // התחזוקה - אם אין במידע, הוסף את ה-default
+                if (recipients == null || recipients.Count == 0)
+                {
+                    recipients = new List<string> { SUPPORT_EMAIL, ADDITIONAL_EMAIL_1, ADDITIONAL_EMAIL_2 };
+                }
+
+                // יצירת תוכן HTML
+                string htmlBody = GenerateCertificateHtml(student, completedCourses);
+
+                // יצירת PDF
+                byte[] pdfBytes = GenerateCompletionCertificatePdf(student, completedCourses);
+
+                Console.WriteLine($"📧 שולח אישור חובות ל-{recipients.Count} נמענים...");
+
+                foreach (var recipient in recipients)
+                {
+                    try
+                    {
+                        using var message = new MailMessage
+                        {
+                            From = new MailAddress(smtpUser, "מערכת הפורטל - בית המורה"),
+                            Subject = $"אישור סיום חובות לימודיים - {student.FirstName} {student.LastName} ({student.StudentID})",
+                            Body = htmlBody,
+                            IsBodyHtml = true,
+                            Priority = MailPriority.High
+                        };
+
+                        message.To.Add(recipient);
+
+                        // הוסף PDF כ-attachment אם הוא קיים
+                        if (pdfBytes != null && pdfBytes.Length > 0)
+                        {
+                            var attachment = new Attachment(new MemoryStream(pdfBytes), $"Ishur_Sium_Chovot_{student.StudentID}.pdf", "application/pdf");
+                            message.Attachments.Add(attachment);
+                        }
+
+                        await client.SendMailAsync(message);
+                        Console.WriteLine($"✅ אישור חובות נשלח בהצלחה ל: {recipient}");
+                        System.IO.File.AppendAllText("C:\\temp\\completion_email_log.txt",
+                            $"{DateTime.Now:dd/MM/yyyy HH:mm:ss}: ✅ Completion certificate sent to {recipient} for {student.StudentID}\n");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"❌ שגיאה בשליחה ל-{recipient}: {ex.Message}");
+                        System.IO.File.AppendAllText("C:\\temp\\completion_email_log.txt",
+                            $"{DateTime.Now:dd/MM/yyyy HH:mm:ss}: ❌ Error sending to {recipient}: {ex.Message}\n");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ שגיאה בתהליך שליחת המייל: {ex.Message}");
+                Console.WriteLine($"   Stack Trace: {ex.StackTrace}");
+                System.IO.File.AppendAllText("C:\\temp\\completion_email_log.txt",
+                    $"{DateTime.Now:dd/MM/yyyy HH:mm:ss}: ❌ FATAL ERROR: {ex.Message}\n{ex.StackTrace}\n");
             }
         }
-    }
-    catch (SmtpException smtpEx)
-    {
-        // שגיאת SMTP ספציפית
-        Console.WriteLine("❌ שגיאת SMTP בשליחת המייל:");
-        Console.WriteLine($"   הודעה: {smtpEx.Message}");
-        Console.WriteLine($"   קוד סטטוס: {smtpEx.StatusCode}");
-        
-        // עזרה לפתרון בעיות נפוצות
-        if (smtpEx.Message.Contains("authentication", StringComparison.OrdinalIgnoreCase) ||
-            smtpEx.Message.Contains("Username and Password not accepted", StringComparison.OrdinalIgnoreCase))
-        {
-            Console.WriteLine("   💡 עצה: בעיית אימות - ודאי שהסיסמה היא App Password תקין");
-            Console.WriteLine("   עבור Google Workspace: צריך App Password בן 16 תווים ללא רווחים");
-        }
-        else if (smtpEx.Message.Contains("timeout", StringComparison.OrdinalIgnoreCase))
-        {
-            Console.WriteLine("   💡 עצה: בעיית זמן תגובה - בדקי חיבור לאינטרנט והגדרות פיירוול");
-        }
-        
-        Console.WriteLine($"   Stack Trace: {smtpEx.StackTrace}");
-    }
-    catch (Exception ex)
-    {
-        // שגיאה כללית
-        Console.WriteLine("❌ שגיאה כללית בשליחת המייל:");
-        Console.WriteLine($"   סוג: {ex.GetType().Name}");
-        Console.WriteLine($"   הודעה: {ex.Message}");
-        Console.WriteLine($"   Stack Trace: {ex.StackTrace}");
-    }
-}
         private Dictionary<string, object?> SafeConvertToDictionary(object obj)
         {
             if (obj == null) return new Dictionary<string, object?>();
@@ -694,6 +816,8 @@ private async Task SendCertificateEmail(dynamic student, IEnumerable<dynamic> co
     string s = val.ToString()?.ToLower()?.Trim() ?? "";
     return s == "true" || s == "1" || s == "yes";
 }
+
+        
         private int GetLessonPrice(string lessonType, string lessonName = "")
 {
     if (string.IsNullOrEmpty(lessonType)) return 50;

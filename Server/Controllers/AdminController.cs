@@ -365,5 +365,108 @@ public async Task<IActionResult> DownloadSubmission(int id)
             if (!System.IO.File.Exists(filePath)) return NotFound("הקובץ לא נמצא");
             return File(System.IO.File.ReadAllBytes(filePath), "application/octet-stream", fileName);
         }
+
+        // ===== פונקציות ניהול חריגים =====
+
+        /// <summary>
+        /// קבלת כל החובות של תלמידה (כולל פטורים והוצאות)
+        /// </summary>
+        [HttpGet("student-debts/{studentId}")]
+        public async Task<IActionResult> GetStudentDebts(string studentId)
+        {
+            try
+            {
+                var debts = await _dbService.GetAllDebtsByStudentIdAsync(studentId);
+                return Ok(debts);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"שגיאה בשליפת החובות: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// הסרת קורס כולו מחובות התלמידה - מחיקה לגמרי מהמסד נתונים
+        /// </summary>
+        [HttpPost("remove-debt/{debtId}")]
+        public async Task<IActionResult> RemoveDebt(int debtId)
+        {
+            try
+            {
+                var debt = await _dbService.GetDebtByIdAsync(debtId);
+                if (debt == null)
+                    return NotFound("החוב לא נמצא");
+
+                await _dbService.RemoveDebtEntirelyAsync(debtId);
+                return Ok(new { message = $"הקורס '{debt.LessonName}' של התלמידה {debt.StudentID} נמחק לגמרי מהמסד נתונים" });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"שגיאה בהסרת החוב: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// פטור מתשלום בלבד על קורס מסוים
+        /// </summary>
+        [HttpPost("exempt-payment/{debtId}")]
+        public async Task<IActionResult> ExemptFromPayment(int debtId)
+        {
+            try
+            {
+                var debt = await _dbService.GetDebtByIdAsync(debtId);
+                if (debt == null)
+                    return NotFound("החוב לא נמצא");
+
+                await _dbService.ExemptDebtFromPaymentAsync(debtId);
+                return Ok(new { message = $"התלמידה {debt.StudentID} פוטרה מתשלום על קורס '{debt.LessonName}'" });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"שגיאה בפטור מתשלום: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// פטור מהגשה בלבד על קורס מסוים
+        /// </summary>
+        [HttpPost("exempt-submission/{debtId}")]
+        public async Task<IActionResult> ExemptFromSubmission(int debtId)
+        {
+            try
+            {
+                var debt = await _dbService.GetDebtByIdAsync(debtId);
+                if (debt == null)
+                    return NotFound("החוב לא נמצא");
+
+                await _dbService.ExemptDebtFromSubmissionAsync(debtId);
+                return Ok(new { message = $"התלמידה {debt.StudentID} פוטרה מהגשה על קורס '{debt.LessonName}'" });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"שגיאה בפטור מהגשה: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// פטור מלא מקורס - גם מתשלום וגם מהגשה (הקורס נשאר בבסיס הנתונים)
+        /// </summary>
+        [HttpPost("exempt-completely/{debtId}")]
+        public async Task<IActionResult> ExemptCompletely(int debtId)
+        {
+            try
+            {
+                var debt = await _dbService.GetDebtByIdAsync(debtId);
+                if (debt == null)
+                    return NotFound("החוב לא נמצא");
+
+                await _dbService.ExemptDebtCompletelyAsync(debtId);
+                return Ok(new { message = $"התלמידה {debt.StudentID} פוטרה לחלוטין מקורס '{debt.LessonName}' (הקורס נשאר בבסיס נתונים)" });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"שגיאה בפטור מלא: {ex.Message}");
+            }
+        }
     }
 }
