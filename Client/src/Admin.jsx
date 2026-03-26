@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Lock, Upload, FileSpreadsheet, Check, Download, RefreshCw, Calendar, FileText, Eye, Loader2, User, Search, Trash2, DollarSign, FileCheck } from 'lucide-react';
+import { Lock, Upload, FileSpreadsheet, Check, Download, RefreshCw, Calendar, FileText, Eye, Loader2, User, Search, Trash2, DollarSign, FileCheck, AlertTriangle, ChevronDown, ChevronUp, GitCompare, Plus, Minus, Link2, Clock } from 'lucide-react';
 
 export default function Admin() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -12,6 +12,10 @@ export default function Admin() {
   const [studentDebts, setStudentDebts] = useState(null);
   const [loadingDebts, setLoadingDebts] = useState(false);
   const [exemptLoading, setExemptLoading] = useState(null);
+  const [compareLoading, setCompareLoading] = useState(false);
+  const [compareResult, setCompareResult] = useState(null);
+  const [expandedSections, setExpandedSections] = useState({});
+  const [restoreLoading, setRestoreLoading] = useState(false);
 
   const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:5219";
 
@@ -71,8 +75,55 @@ export default function Admin() {
 
   // פונקציה להורדת הקובץ הקיים
   const downloadCurrent = () => {
-      // פתיחת הקישור בחלון חדש מורידה את הקובץ
       window.open(`${API_BASE_URL}/api/admin/download-current`, '_blank');
+  };
+
+  const handleBackupDb = () => {
+      window.open(`${API_BASE_URL}/api/admin/backup-db`, '_blank');
+  };
+
+  const handleRestoreDb = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (!confirm('⚠️ אזהרה חמורה!\nפעולה זו תמחק את כל המסד נתונים הנוכחי ותחליף אותו בגיבוי.\nהאם את בטוחה?')) {
+      e.target.value = '';
+      return;
+    }
+    setRestoreLoading(true);
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+      const res = await axios.post(`${API_BASE_URL}/api/admin/restore-db`, formData);
+      alert('✅ ' + res.data.message);
+    } catch (error) {
+      alert('שגיאה בשחזור: ' + (error.response?.data || error.message));
+    } finally {
+      setRestoreLoading(false);
+      e.target.value = '';
+    }
+  };
+
+  const handleCompareExcel = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setCompareLoading(true);
+    setCompareResult(null);
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+      const res = await axios.post(`${API_BASE_URL}/api/admin/compare-excel`, formData);
+      setCompareResult(res.data);
+      setExpandedSections({});
+    } catch (error) {
+      alert('שגיאה בהשוואה: ' + (error.response?.data || error.message));
+    } finally {
+      setCompareLoading(false);
+      e.target.value = '';
+    }
+  };
+
+  const toggleSection = (section) => {
+    setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }));
   };
 
   const handleDownloadReport = async () => {
@@ -170,6 +221,16 @@ export default function Admin() {
   }
 
   // --- מסך ניהול ---
+  const compareSections = compareResult ? [
+    { key: 'newStudents', data: compareResult.details.newStudents, label: 'תלמידות חדשות שיתווספו', border: 'border-green-200', bg: 'bg-green-50 hover:bg-green-100', txt: 'text-green-800', render: s => `${s.lastName} ${s.firstName} (${s.studentId})` },
+    { key: 'deletedStudentsSafe', data: compareResult.details.deletedStudentsSafe, label: 'תלמידות שיימחקו (ללא היסטוריה)', border: 'border-red-200', bg: 'bg-red-50 hover:bg-red-100', txt: 'text-red-800', render: s => `${s.lastName} ${s.firstName} (${s.studentId})` },
+    { key: 'deletedStudentsProtected', data: compareResult.details.deletedStudentsProtected, label: '⚠️ אינן בקובץ אך מוגנות — לא יימחקו', border: 'border-yellow-200', bg: 'bg-yellow-50 hover:bg-yellow-100', txt: 'text-yellow-800', render: s => `${s.lastName} ${s.firstName} (${s.studentId})` },
+    { key: 'removedCourses', data: compareResult.details.removedCourses, label: 'קורסים שיושבתו (אינם בקובץ החדש)', border: 'border-orange-200', bg: 'bg-orange-50 hover:bg-orange-100', txt: 'text-orange-800', render: d => `${d.studentName} — ${d.lessonName}${d.hasActivity ? '  ⚠️ יש פעילות!' : ''}` },
+    { key: 'newCourses', data: compareResult.details.newCourses, label: 'קורסים שיתווספו / יופעלו מחדש', border: 'border-emerald-200', bg: 'bg-emerald-50 hover:bg-emerald-100', txt: 'text-emerald-800', render: d => `${d.studentName} — ${d.lessonName} (שיעור ${d.lessonNumber})${d.isReactivation ? '  🔄 הפעלה מחדש (היה כבוי)' : ''}${d.isAutoSubmitted ? '  📋 יסומן כהוגש אוטומטית (קישור אינו URL)' : ''}` },
+    { key: 'changedLinks', data: compareResult.details.changedLinks, label: 'קישורים שהשתנו', border: 'border-blue-200', bg: 'bg-blue-50 hover:bg-blue-100', txt: 'text-blue-800', render: null },
+    { key: 'changedHours', data: compareResult.details.changedHours, label: 'שעות שהשתנו', border: 'border-purple-200', bg: 'bg-purple-50 hover:bg-purple-100', txt: 'text-purple-800', render: d => `${d.studentName} — ${d.lessonName}: ${d.oldHours} ← ${d.newHours} שעות${d.isSubmitted ? '  🔒 כבר הוגש — לא יתעדכן' : ''}` },
+  ].filter(s => s.data?.length > 0) : [];
+
   return (
     <div className="p-8 bg-gray-50 min-h-screen font-sans" dir="rtl">
       <div className="max-w-4xl mx-auto">
@@ -220,15 +281,116 @@ export default function Admin() {
                 )}
             </div>
 
-            {/* 2. כרטיס העלאה וסנכרון */}
+            {/* 2. כרטיס השוואת קובץ לפני סנכרון */}
+            <div className="bg-white p-6 rounded-2xl shadow-sm border border-amber-200">
+                <h3 className="text-xl font-bold mb-2 text-gray-800 flex items-center gap-2">
+                    <GitCompare className="text-amber-500"/> השוואת קובץ לפני סנכרון
+                </h3>
+                <p className="text-gray-500 mb-5 text-sm">
+                    העלי קובץ Excel לצפייה בהבדלים מול המסד — <b>ללא שמירה או שינוי כלשהו</b>.
+                </p>
+                <label className={`block w-full border-2 border-dashed ${
+                    compareLoading ? 'border-amber-300 bg-amber-50' : 'border-gray-300 hover:border-amber-400 hover:bg-amber-50'
+                } rounded-xl p-8 text-center cursor-pointer transition`}>
+                    <input type="file" className="hidden" accept=".xlsx" onChange={handleCompareExcel} disabled={compareLoading} />
+                    {compareLoading ? (
+                        <div className="flex flex-col items-center gap-2">
+                            <Loader2 className="animate-spin text-amber-500" size={32}/>
+                            <span className="text-amber-600 font-bold">משווה נתונים...</span>
+                        </div>
+                    ) : (
+                        <div className="flex flex-col items-center gap-2">
+                            <div className="bg-amber-100 p-3 rounded-full text-amber-500">
+                                <GitCompare size={28}/>
+                            </div>
+                            <span className="font-bold text-gray-700">בחרי קובץ Excel להשוואה בלבד</span>
+                            <span className="text-xs text-gray-400">הנתונים לא ישתנו</span>
+                        </div>
+                    )}
+                </label>
+
+                {compareResult && (
+                    <div className="mt-5 space-y-3">
+                        {/* סיכום */}
+                        <div className="p-4 bg-gray-50 rounded-xl border border-gray-200">
+                            <p className="text-sm font-bold text-gray-700 mb-2">
+                                {compareResult.summary.totalChanges === 0
+                                    ? '✅ הקובץ זהה לנתונים הנוכחיים — אין שינויים'
+                                    : `סה"\u05db שינויים`}
+                            </p>
+                            <div className="flex flex-wrap gap-2">
+                                {compareResult.summary.newStudents > 0 && <span className="bg-green-100 text-green-800 text-xs font-bold px-2.5 py-1 rounded-full flex items-center gap-1"><Plus size={12}/> {compareResult.summary.newStudents} תלמידות חדשות</span>}
+                                {compareResult.summary.deletedStudentsSafe > 0 && <span className="bg-red-100 text-red-800 text-xs font-bold px-2.5 py-1 rounded-full flex items-center gap-1"><Minus size={12}/> {compareResult.summary.deletedStudentsSafe} תלמידות יימחקו</span>}
+                                {compareResult.summary.deletedStudentsProtected > 0 && <span className="bg-yellow-100 text-yellow-900 text-xs font-bold px-2.5 py-1 rounded-full flex items-center gap-1"><AlertTriangle size={12}/> {compareResult.summary.deletedStudentsProtected} מוגנות (לא יימחקו)</span>}
+                                {compareResult.summary.newCourses > 0 && <span className="bg-emerald-100 text-emerald-800 text-xs font-bold px-2.5 py-1 rounded-full flex items-center gap-1"><Plus size={12}/> {compareResult.summary.newCourses} קורסים חדשים</span>}
+                                {compareResult.summary.removedCourses > 0 && <span className="bg-orange-100 text-orange-800 text-xs font-bold px-2.5 py-1 rounded-full flex items-center gap-1"><Minus size={12}/> {compareResult.summary.removedCourses} קורסים יושבתו</span>}
+                                {compareResult.summary.changedLinks > 0 && <span className="bg-blue-100 text-blue-800 text-xs font-bold px-2.5 py-1 rounded-full flex items-center gap-1"><Link2 size={12}/> {compareResult.summary.changedLinks} קישורים שהשתנו</span>}
+                                {compareResult.summary.changedHours > 0 && <span className="bg-purple-100 text-purple-800 text-xs font-bold px-2.5 py-1 rounded-full flex items-center gap-1"><Clock size={12}/> {compareResult.summary.changedHours} שעות שהשתנו</span>}
+                            </div>
+                        </div>
+
+                        {/* סקציות פרטים */}
+                        {compareSections.map(section => (
+                            <div key={section.key} className={`border ${section.border} rounded-xl overflow-hidden`}>
+                                <button
+                                    onClick={() => toggleSection(section.key)}
+                                    className={`w-full flex justify-between items-center px-4 py-3 ${section.bg} text-right transition`}
+                                >
+                                    <span className={`font-bold text-sm ${section.txt}`}>{section.label} ({section.data.length})</span>
+                                    {expandedSections[section.key]
+                                        ? <ChevronUp size={16} className={section.txt}/>
+                                        : <ChevronDown size={16} className={section.txt}/>}
+                                </button>
+                                {expandedSections[section.key] && (
+                                    <div className="max-h-64 overflow-y-auto divide-y divide-gray-100 bg-white">
+                                        {section.key === 'changedLinks'
+                                            ? section.data.map((d, i) => (
+                                                <div key={i} className={`px-4 py-3 text-sm ${d.isSubmitted ? 'bg-gray-50' : ''}`}>
+                                                    <div className="font-medium text-gray-800">
+                                                        {d.studentName} — {d.lessonName}
+                                                        {d.isSubmitted
+                                                            ? <span className="text-gray-500 font-bold mr-2"> 🔒 כבר הוגש — הקישור לא יעודכן בסנכרון</span>
+                                                            : null
+                                                        }
+                                                    </div>
+                                                    <div className="text-xs mt-1 text-gray-500">ישן: <span className="text-red-600 break-all">{d.oldLink || '(ריק)'}</span></div>
+                                                    <div className={`text-xs mt-0.5 text-gray-500 ${d.isSubmitted ? 'line-through opacity-50' : ''}`}>חדש: <span className="text-green-600 break-all">{d.newLink || '(ריק)'}</span></div>
+                                                </div>
+                                            ))
+                                            : section.data.map((item, i) => (
+                                                <div key={i} className="px-4 py-2 text-sm text-gray-700">{section.render(item)}</div>
+                                            ))
+                                        }
+                                    </div>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+
+            {/* 3. כרטיס העלאה וסנכרון */}
             <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
                 <h3 className="text-xl font-bold mb-2 text-gray-800 flex items-center gap-2">
                     <RefreshCw className="text-orange-500"/>
                     העלאת קובץ חדש (עדכון)
                 </h3>
-                <p className="text-gray-500 mb-6 text-sm">
+                <p className="text-gray-500 mb-4 text-sm">
                     העלאת קובץ תחליף את הקובץ הישן ותבצע <b>סנכרון מלא</b> של החובות במערכת.
                 </p>
+                <div className="mb-6 flex flex-wrap gap-3">
+                    <button
+                        onClick={handleBackupDb}
+                        className="bg-gray-100 hover:bg-gray-200 text-gray-700 px-4 py-2 rounded-lg border border-gray-300 flex items-center gap-2 text-sm font-bold transition"
+                    >
+                        <Download size={16}/> גיבוי DB לפני סנכרון
+                    </button>
+                    <label className={`${restoreLoading ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'} bg-red-50 hover:bg-red-100 text-red-700 px-4 py-2 rounded-lg border border-red-200 flex items-center gap-2 text-sm font-bold transition`}>
+                        <input type="file" className="hidden" accept=".json" onChange={handleRestoreDb} disabled={restoreLoading}/>
+                        {restoreLoading ? <Loader2 className="animate-spin" size={16}/> : <RefreshCw size={16}/>}
+                        שחזור DB מגיבוי
+                    </label>
+                </div>
 
                 <label className={`block w-full border-2 border-dashed ${uploading ? 'border-blue-300 bg-blue-50' : 'border-gray-300 hover:border-blue-400 hover:bg-gray-50'} rounded-xl p-10 text-center cursor-pointer transition duration-300 group`}>
                     <input type="file" className="hidden" accept=".xlsx" onChange={handleFileUpload} disabled={uploading} />

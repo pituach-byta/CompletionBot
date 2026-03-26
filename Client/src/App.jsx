@@ -66,7 +66,7 @@ const PaymentIframe = ({ totalAmount, onSuccess, onClose, debtsToPay, student })
   const param1Value = useMemo(() => {
     if (!debtsToPay || debtsToPay.length === 0) return '';
     const debtIds = debtsToPay
-      .map(d => d.DebtID || d.id)
+      .map(d => d.DebtID || d.debtID || d.id)
       .filter(id => id)
       .join(',');
     return debtIds;
@@ -593,6 +593,7 @@ function App() {
   const [studentData, setStudentData] = useState(null);
   const [paymentModal, setPaymentModal] = useState(null);
   const [uploadingId, setUploadingId] = useState(null);
+  const [paymentProcessing, setPaymentProcessing] = useState(false);
 
   const messagesEndRef = useRef(null);
   const lastBotMessageRef = useRef(null);
@@ -695,6 +696,9 @@ function App() {
   };
 
   const onPaymentSuccess = async (transId) => {
+    // הצגת מסך טעינה מיידית לפני כל פעולה
+    setPaymentProcessing(true);
+
     // 1. שומרים את רשימת החובות ששולמו ופרטי התשלום לפני שסוגרים את המודל
     const debtsToPay = paymentModal.debts;
     const paymentAmount = paymentModal.amount;
@@ -717,36 +721,23 @@ function App() {
       console.log("✅ קורסים אחרי עדכון:", newDebts.length);
       console.log("🔍 קורסים עם isPaid=true:", newDebts.filter(d => getVal(d, 'isPaid', 'IsPaid')).length);
 
-      // ✅ שליחת מייל עם קבלה למזכירות
-      try {
-        const receiptPayload = {
-          studentId: studentData.studentId,
-          studentName: `${studentData.firstName} ${studentData.lastName}`, // שם מלא לתאימות
-          firstName: studentData.firstName,
-          lastName: studentData.lastName,
-          amount: paymentAmount,
-          debts: debtsToPay.map(d => ({
-            lessonName: getVal(d, 'lessonName', 'LessonName'),
-            lessonType: getVal(d, 'lessonType', 'LessonType'),
-            price: getVal(d, 'price', 'Price') || 50,
-            lessonNumber: getVal(d, 'lessonNumber', 'LessonNumber')
-          }))
-        };
-
-        console.log("📧 שולח קבלה למזכירות:", receiptPayload);
-        
-        await axios.post(
-          `${API_BASE_URL}/api/payment/send-receipt`,
-          receiptPayload
-        );
-        
-        console.log("✅ הקבלה נשלחה בהצלחה לתיבת המזכירות!");
-      } catch (emailError) {
-        console.error("⚠️ שגיאה בשליחת הקבלה:", emailError.message);
-        console.error("📋 Status:", emailError.response?.status);
-        console.error("📋 Response Data:", emailError.response?.data);
-        console.error("📋 Full Error:", emailError);
-      }
+      // ✅ שליחת מייל עם קבלה למזכירות - ברקע, ללא המתנה
+      const receiptPayload = {
+        studentId: studentData.studentId,
+        studentName: `${studentData.firstName} ${studentData.lastName}`,
+        firstName: studentData.firstName,
+        lastName: studentData.lastName,
+        amount: paymentAmount,
+        debts: debtsToPay.map(d => ({
+          lessonName: getVal(d, 'lessonName', 'LessonName'),
+          lessonType: getVal(d, 'lessonType', 'LessonType'),
+          price: getVal(d, 'price', 'Price') || 50,
+          lessonNumber: getVal(d, 'lessonNumber', 'LessonNumber')
+        }))
+      };
+      axios.post(`${API_BASE_URL}/api/payment/send-receipt`, receiptPayload)
+        .then(() => console.log("✅ הקבלה נשלחה בהצלחה לתיבת המזכירות!"))
+        .catch(err => console.error("⚠️ שגיאה בשליחת הקבלה:", err.message));
 
       // מעדכנים את נתוני התלמידה בזיכרון של הדפדפן
       setStudentData({ ...studentData, debts: newDebts });
@@ -769,9 +760,12 @@ const successMsg = `<div style="line-height: 1.4; color: #374151;">
           role: 'bot', 
           text: successMsg, 
           data: newDebts, 
-          actionType: 'UploadFile' // זה גורם ל-DebtsList להציג כפתורי העלאה
+          actionType: 'UploadFile'
         }
       ]);
+      setPaymentProcessing(false);
+    } else {
+      setPaymentProcessing(false);
     }
   };
   const InputArea = ({ className = "" }) => (
@@ -830,6 +824,15 @@ const successMsg = `<div style="line-height: 1.4; color: #374151;">
         </div>
 
         {!isFirstInteraction && <div className="p-4 bg-white border-t border-gray-100"><InputArea /></div>}
+        {paymentProcessing && (
+          <div className="fixed inset-0 z-[10000] bg-black/60 backdrop-blur-sm flex items-center justify-center" dir="rtl">
+            <div className="bg-white rounded-2xl p-8 flex flex-col items-center gap-4 shadow-2xl max-w-xs w-full mx-4">
+              <Loader2 className="animate-spin text-[#008f78]" size={44} />
+              <p className="text-lg font-bold text-gray-700">מתבצע עיבוד התשלום</p>
+              <p className="text-sm text-gray-500 text-center">נא המתיני לפתיחת הקורסים...</p>
+            </div>
+          </div>
+        )}
         {paymentModal && (
   <PaymentIframe 
     totalAmount={paymentModal.amount} 

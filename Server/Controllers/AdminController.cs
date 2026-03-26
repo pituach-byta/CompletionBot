@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using OfficeOpenXml; 
 using CompletionBot.Server.Services;
+using CompletionBot.Server.Models;
 using Dapper;
 using System.IO.Compression; // הוספנו את זה בשביל ה-ZIP
 using System.Data.SqlClient;
@@ -22,6 +23,19 @@ namespace CompletionBot.Server.Controllers
         }
 
         public class LoginRequest { public string Password { get; set; } = ""; }
+
+        private class DbDebtRow
+        {
+            public string StudentID { get; set; } = "";
+            public string LessonName { get; set; } = "";
+            public int LessonNumber { get; set; }
+            public string? MaterialLink { get; set; }
+            public int Hours { get; set; }
+            public bool IsSubmitted { get; set; }
+            public bool IsPaid { get; set; }
+            public string? FirstName { get; set; }
+            public string? LastName { get; set; }
+        }
 
         [HttpPost("login")]
         public IActionResult Login([FromBody] LoginRequest request)
@@ -46,6 +60,197 @@ namespace CompletionBot.Server.Controllers
             var path = Path.Combine(_env.ContentRootPath, "Data", "Current_Debts.xlsx");
             if (!System.IO.File.Exists(path)) return NotFound("לא נמצא קובץ");
             return File(System.IO.File.ReadAllBytes(path), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "Current_Debts.xlsx");
+        }
+
+        // --- השוואת קובץ אקסל מול מסד הנתונים ללא שמירה ---
+        [HttpPost("compare-excel")]
+        public async Task<IActionResult> CompareExcel(IFormFile file)
+        {
+            if (file == null || file.Length == 0) return BadRequest("לא נבחר קובץ");
+            if (Path.GetExtension(file.FileName).ToLower() != ".xlsx") return BadRequest("נא להעלות קובץ .xlsx בלבד");
+            try
+            {
+                using var stream = new MemoryStream();
+                await file.CopyToAsync(stream);
+                stream.Position = 0;
+
+                using var package = new ExcelPackage(stream);
+                var worksheet = package.Workbook.Worksheets[0];
+                var rowCount = worksheet.Dimension?.Rows ?? 0;
+                var colCount = worksheet.Dimension?.Columns ?? 0;
+                if (rowCount < 2) return BadRequest("הקובץ נראה ריק");
+
+                var colMap = new Dictionary<string, int>();
+                for (int col = 1; col <= colCount; col++)
+                {
+                    var header = worksheet.Cells[1, col].Value?.ToString()?.Trim();
+                    if (!string.IsNullOrEmpty(header)) colMap[header] = col;
+                }
+
+                var requiredHeaders = new[] { "ת. זהות", "שם שיעור", "שעות", "מספר שיעור" };
+                foreach (var h in requiredHeaders)
+                    if (!colMap.ContainsKey(h)) return BadRequest($"חסרה עמודה חובה: {h}");
+
+                string GetVal(int row, string colName) =>
+                    colMap.TryGetValue(colName, out int idx) ? worksheet.Cells[row, idx].Value?.ToString()?.Trim() ?? "" : "";
+
+                bool IsUrl(string path) => Uri.TryCreate(path, UriKind.Absolute, out var uriResult)
+                    && (uriResult.Scheme == Uri.UriSchemeHttp || uriResult.Scheme == Uri.UriSchemeHttps);
+
+                // בנייה מקובץ האקסל
+                var excelStudents = new Dictionary<string, (string FirstName, string LastName)>();
+                var excelDebts = new Dictionary<string, (string LessonName, int LessonNumber, string MaterialLink, int Hours)>();
+                for (int row = 2; row <= rowCount; row++)
+                {
+                    var sid = GetVal(row, "ת. זהות");
+                    if (string.IsNullOrEmpty(sid)) continue;
+                    if (!excelStudents.ContainsKey(sid))
+                        excelStudents[sid] = (GetVal(row, "שם פרטי משתלמת"), GetVal(row, "שם משפחה משתלמת"));
+                    string rawNum = GetVal(row, "מספר שיעור").Replace(".0", "").Trim();
+                    int.TryParse(rawNum, out int lessonNum);
+                    int.TryParse(GetVal(row, "שעות"), out int hours);
+                    var lessonName = GetVal(row, "שם שיעור");
+                    var link = GetVal(row, "קישור לעבודה");
+                    var key = $"{sid}|{lessonName}|{lessonNum}";
+                    if (!excelDebts.ContainsKey(key))
+                        excelDebts[key] = (lessonName, lessonNum, link, hours);
+                }
+
+                // שאילתות מהמסד
+                using var conn = _dbService.CreateConnection();
+                var dbStudents = (await conn.QueryAsync<Student>(
+                    "SELECT StudentID, FirstName, LastName FROM Students WHERE Status = 'Active'"
+                )).ToDictionary(s => s.StudentID);
+
+                var dbDebtsList = await conn.QueryAsync<DbDebtRow>(@"
+                    SELECT sd.StudentID, sd.LessonName, sd.LessonNumber,
+                           sd.MaterialLink, sd.Hours, sd.IsSubmitted, sd.IsPaid,
+                           s.FirstName, s.LastName
+                    FROM StudentDebts sd
+                    JOIN Students s ON sd.StudentID = s.StudentID
+                    WHERE sd.IsActive = 1");
+                var dbDebts = dbDebtsList.ToDictionary(
+                    d => $"{d.StudentID}|{d.LessonName ?? ""}|{d.LessonNumber}");
+
+                // כל המפתחות של קורסים במסד (כולל IsActive=0) — לזיהוי קורסים שחוזרים לפעילות
+                var allDbDebtKeys = new HashSet<string>(await conn.QueryAsync<string>(@"
+                    SELECT StudentID + '|' + ISNULL(LessonName,'') + '|' + CAST(LessonNumber AS NVARCHAR)
+                    FROM StudentDebts"));
+
+                var studentsWithHistory = new HashSet<string>(await conn.QueryAsync<string>(
+                    "SELECT DISTINCT StudentID FROM StudentDebts WHERE IsPaid = 1 OR IsSubmitted = 1"));
+
+                // --- השוואה ---
+                var newStudents = excelStudents.Keys
+                    .Where(id => !dbStudents.ContainsKey(id))
+                    .Select(id => new { studentId = id, firstName = excelStudents[id].FirstName, lastName = excelStudents[id].LastName })
+                    .OrderBy(x => x.lastName).ToList();
+
+                var deletedSafe = dbStudents.Keys
+                    .Where(id => !excelStudents.ContainsKey(id) && !studentsWithHistory.Contains(id))
+                    .Select(id => new { studentId = id, firstName = dbStudents[id].FirstName ?? "", lastName = dbStudents[id].LastName ?? "" })
+                    .OrderBy(x => x.lastName).ToList();
+
+                var deletedProtected = dbStudents.Keys
+                    .Where(id => !excelStudents.ContainsKey(id) && studentsWithHistory.Contains(id))
+                    .Select(id => new { studentId = id, firstName = dbStudents[id].FirstName ?? "", lastName = dbStudents[id].LastName ?? "", reason = "יש הגשות/תשלומים - לא תימחק" })
+                    .OrderBy(x => x.lastName).ToList();
+
+                var newCourses = excelDebts.Keys
+                    .Where(k => !dbDebts.ContainsKey(k))
+                    .Select(k =>
+                    {
+                        var parts = k.Split('|');
+                        var sid2 = parts[0];
+                        var d = excelDebts[k];
+                        var sName = excelStudents.TryGetValue(sid2, out var sn) ? $"{sn.FirstName} {sn.LastName}".Trim() : sid2;
+                        bool autoSubmit = !string.IsNullOrEmpty(d.MaterialLink) && !IsUrl(d.MaterialLink);
+                        bool isReactivation = allDbDebtKeys.Contains(k);
+                        return new { studentId = sid2, studentName = sName, lessonName = d.LessonName, lessonNumber = d.LessonNumber, isAutoSubmitted = autoSubmit, isReactivation };
+                    })
+                    .OrderBy(x => x.studentName).ToList();
+
+                var removedCourses = dbDebts.Keys
+                    .Where(k => !excelDebts.ContainsKey(k))
+                    .Select(k =>
+                    {
+                        var d = dbDebts[k];
+                        return new
+                        {
+                            studentId = d.StudentID,
+                            studentName = $"{d.FirstName} {d.LastName}".Trim(),
+                            lessonName = d.LessonName,
+                            lessonNumber = d.LessonNumber,
+                            isSubmitted = d.IsSubmitted,
+                            isPaid = d.IsPaid,
+                            hasActivity = d.IsSubmitted || d.IsPaid
+                        };
+                    })
+                    .OrderByDescending(x => x.hasActivity).ThenBy(x => x.studentName).ToList();
+
+                var changedLinks = dbDebts.Keys
+                    .Where(k => excelDebts.ContainsKey(k))
+                    .Select(k => new { d = dbDebts[k], ex = excelDebts[k] })
+                    .Where(x => (x.d.MaterialLink ?? "") != x.ex.MaterialLink)
+                    .Select(x => new
+                    {
+                        studentId = x.d.StudentID,
+                        studentName = $"{x.d.FirstName} {x.d.LastName}".Trim(),
+                        lessonName = x.d.LessonName,
+                        lessonNumber = x.d.LessonNumber,
+                        oldLink = x.d.MaterialLink ?? "",
+                        newLink = x.ex.MaterialLink,
+                        isSubmitted = x.d.IsSubmitted,
+                        willUpdateLink = !x.d.IsSubmitted
+                    })
+                    .OrderByDescending(x => x.isSubmitted).ThenBy(x => x.studentName).ToList();
+
+                var changedHours = dbDebts.Keys
+                    .Where(k => excelDebts.ContainsKey(k))
+                    .Select(k => new { d = dbDebts[k], ex = excelDebts[k] })
+                    .Where(x => x.d.Hours != x.ex.Hours)
+                    .Select(x => new
+                    {
+                        studentId = x.d.StudentID,
+                        studentName = $"{x.d.FirstName} {x.d.LastName}".Trim(),
+                        lessonName = x.d.LessonName,
+                        oldHours = x.d.Hours,
+                        newHours = x.ex.Hours,
+                        isSubmitted = x.d.IsSubmitted,
+                        willUpdate = !x.d.IsSubmitted
+                    })
+                    .OrderByDescending(x => x.isSubmitted).ThenBy(x => x.studentName).ToList();
+
+                return Ok(new
+                {
+                    summary = new
+                    {
+                        newStudents = newStudents.Count,
+                        deletedStudentsSafe = deletedSafe.Count,
+                        deletedStudentsProtected = deletedProtected.Count,
+                        newCourses = newCourses.Count,
+                        removedCourses = removedCourses.Count,
+                        changedLinks = changedLinks.Count,
+                        changedHours = changedHours.Count,
+                        totalChanges = newStudents.Count + deletedSafe.Count + deletedProtected.Count
+                            + newCourses.Count + removedCourses.Count + changedLinks.Count + changedHours.Count
+                    },
+                    details = new
+                    {
+                        newStudents,
+                        deletedStudentsSafe = deletedSafe,
+                        deletedStudentsProtected = deletedProtected,
+                        newCourses,
+                        removedCourses,
+                        changedLinks,
+                        changedHours
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "שגיאה בהשוואה: " + ex.Message);
+            }
         }
 
  [HttpPost("upload-excel")]
@@ -117,11 +322,35 @@ public async Task<IActionResult> UploadExcel(IFormFile file)
                             await bulkCopy.WriteToServerAsync(dt);
                         }
 
-                        // 3. מחיקת תלמידות שלא באקסל (לוגיקה מקורית ללא שינוי, רק שימוש בטבלה הזמנית)
+                        // 3. מחיקת תלמידות שלא באקסל - רק אם אין להן הגשות או תשלומים (הגנה על נתונים חשובים)
                         var deleteMissingStudents = @"
-                            DELETE FROM Submissions WHERE StudentID IN (SELECT StudentID FROM Students WHERE StudentID NOT IN (SELECT ID FROM #ExcelIds) AND Status = 'Active');
-                            DELETE FROM StudentDebts WHERE StudentID IN (SELECT StudentID FROM Students WHERE StudentID NOT IN (SELECT ID FROM #ExcelIds) AND Status = 'Active');
-                            DELETE FROM Students WHERE StudentID NOT IN (SELECT ID FROM #ExcelIds) AND Status = 'Active'";
+                            DELETE FROM Submissions 
+                            WHERE StudentID IN (
+                                SELECT StudentID FROM Students 
+                                WHERE StudentID NOT IN (SELECT ID FROM #ExcelIds) 
+                                AND Status = 'Active'
+                                AND StudentID NOT IN (
+                                    SELECT DISTINCT StudentID FROM StudentDebts 
+                                    WHERE IsPaid = 1 OR IsSubmitted = 1
+                                )
+                            );
+                            DELETE FROM StudentDebts 
+                            WHERE StudentID IN (
+                                SELECT StudentID FROM Students 
+                                WHERE StudentID NOT IN (SELECT ID FROM #ExcelIds) 
+                                AND Status = 'Active'
+                                AND StudentID NOT IN (
+                                    SELECT DISTINCT StudentID FROM StudentDebts 
+                                    WHERE IsPaid = 1 OR IsSubmitted = 1
+                                )
+                            );
+                            DELETE FROM Students 
+                            WHERE StudentID NOT IN (SELECT ID FROM #ExcelIds) 
+                            AND Status = 'Active'
+                            AND StudentID NOT IN (
+                                SELECT DISTINCT StudentID FROM StudentDebts 
+                                WHERE IsPaid = 1 OR IsSubmitted = 1
+                            )";
                         
                         await connection.ExecuteAsync(deleteMissingStudents, transaction: transaction);
 
@@ -169,7 +398,11 @@ public async Task<IActionResult> UploadExcel(IFormFile file)
                                     INSERT INTO StudentDebts (StudentID, LessonName, LessonType, LessonNumber, Hours, LecturerName, StudyGoal, DomainType, MaterialLink, IsActive, IsPaid, IsSubmitted, IsExempt) 
                                     VALUES (@StudentID, @LessonName, @LessonType, @LessonNumber, @Hours, @LecturerName, @StudyGoal, @DomainType, @MaterialLink, 1, 0, @InitSub, @IsExempt)
                                 ELSE
-                                    UPDATE StudentDebts SET IsActive = 1, IsExempt = @IsExempt, MaterialLink = @MaterialLink, Hours = @Hours
+                                    UPDATE StudentDebts SET
+                                        IsActive = 1,
+                                        IsExempt      = CASE WHEN IsSubmitted = 1 THEN IsExempt      ELSE @IsExempt      END,
+                                        Hours         = CASE WHEN IsSubmitted = 1 THEN Hours         ELSE @Hours         END,
+                                        MaterialLink  = CASE WHEN IsSubmitted = 1 THEN MaterialLink  ELSE @MaterialLink  END
                                     WHERE StudentID = @StudentID AND LessonName = @LessonName AND LessonNumber = @LessonNumber";
 
                             await connection.ExecuteAsync(upsertDebt, new { 
@@ -445,6 +678,144 @@ public async Task<IActionResult> DownloadSubmission(int id)
             catch (Exception ex)
             {
                 return StatusCode(500, $"שגיאה בפטור מהגשה: {ex.Message}");
+            }
+        }
+
+        [HttpGet("backup-db")]
+        public async Task<IActionResult> BackupDb()
+        {
+            try
+            {
+                using var connection = _dbService.CreateConnection();
+                var students    = (await connection.QueryAsync<dynamic>("SELECT * FROM Students")).ToList();
+                var debts       = (await connection.QueryAsync<dynamic>("SELECT * FROM StudentDebts")).ToList();
+                var submissions = (await connection.QueryAsync<dynamic>("SELECT * FROM Submissions")).ToList();
+
+                var backup = new { exportedAt = DateTime.Now, students, debts, submissions };
+                var json = System.Text.Json.JsonSerializer.Serialize(backup,
+                    new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+
+                var fileName = $"DB_Backup_{DateTime.Now:yyyyMMdd_HHmmss}.json";
+                return File(System.Text.Encoding.UTF8.GetBytes(json), "application/json", fileName);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "שגיאה בגיבוי: " + ex.Message);
+            }
+        }
+
+        private class BackupData
+        {
+            public List<BackupStudent> Students { get; set; } = new();
+            public List<BackupDebt> Debts { get; set; } = new();
+            public List<BackupSubmission> Submissions { get; set; } = new();
+        }
+        private class BackupStudent
+        {
+            public string StudentID { get; set; } = "";
+            public string? FirstName { get; set; }
+            public string? LastName { get; set; }
+            public string? YearGroup { get; set; }
+            public string? StudentGroup { get; set; }
+            public string? Status { get; set; }
+        }
+        private class BackupDebt
+        {
+            public int DebtID { get; set; }
+            public string StudentID { get; set; } = "";
+            public string? LessonName { get; set; }
+            public string? LessonType { get; set; }
+            public int LessonNumber { get; set; }
+            public int Hours { get; set; }
+            public string? LecturerName { get; set; }
+            public string? StudyGoal { get; set; }
+            public string? DomainType { get; set; }
+            public string? MaterialLink { get; set; }
+            public bool IsPaid { get; set; }
+            public string? TransactionId { get; set; }
+            public bool IsSubmitted { get; set; }
+            public bool IsExempt { get; set; }
+            public bool IsActive { get; set; }
+            public DateTime LastUpdated { get; set; }
+            public DateTime? UploadDate { get; set; }
+        }
+        private class BackupSubmission
+        {
+            public int SubmissionID { get; set; }
+            public int DebtID { get; set; }
+            public string? StudentID { get; set; }
+            public string? FilePath { get; set; }
+            public DateTime? UploadDate { get; set; }
+            public string? FileName { get; set; }
+        }
+
+        [HttpPost("restore-db")]
+        public async Task<IActionResult> RestoreDb(IFormFile file)
+        {
+            if (file == null || file.Length == 0) return BadRequest("לא נבחר קובץ");
+            if (Path.GetExtension(file.FileName).ToLower() != ".json") return BadRequest("נא להעלות קובץ JSON בלבד");
+
+            try
+            {
+                using var stream = file.OpenReadStream();
+                var backup = await System.Text.Json.JsonSerializer.DeserializeAsync<BackupData>(stream,
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+                if (backup == null) return BadRequest("קובץ גיבוי לא תקין");
+
+                using var connection = _dbService.CreateConnection();
+                connection.Open();
+                using var transaction = connection.BeginTransaction();
+
+                try
+                {
+                    // מחיקה בסדר הנכון (FK)
+                    await connection.ExecuteAsync("DELETE FROM Submissions", transaction: transaction);
+                    await connection.ExecuteAsync("DELETE FROM StudentDebts", transaction: transaction);
+                    await connection.ExecuteAsync("DELETE FROM Students", transaction: transaction);
+
+                    // שחזור Students
+                    foreach (var s in backup.Students)
+                        await connection.ExecuteAsync(
+                            "INSERT INTO Students (StudentID, FirstName, LastName, YearGroup, StudentGroup, Status) VALUES (@StudentID, @FirstName, @LastName, @YearGroup, @StudentGroup, @Status)",
+                            s, transaction: transaction);
+
+                    // שחזור StudentDebts (עם IDENTITY_INSERT)
+                    if (backup.Debts.Count > 0)
+                    {
+                        await connection.ExecuteAsync("SET IDENTITY_INSERT StudentDebts ON", transaction: transaction);
+                        foreach (var d in backup.Debts)
+                            await connection.ExecuteAsync(@"
+                                INSERT INTO StudentDebts (DebtID, StudentID, LessonName, LessonType, LessonNumber, Hours, LecturerName, StudyGoal, DomainType, MaterialLink, IsPaid, TransactionId, IsSubmitted, IsExempt, IsActive, LastUpdated)
+                                VALUES (@DebtID, @StudentID, @LessonName, @LessonType, @LessonNumber, @Hours, @LecturerName, @StudyGoal, @DomainType, @MaterialLink, @IsPaid, @TransactionId, @IsSubmitted, @IsExempt, @IsActive, @LastUpdated)",
+                                d, transaction: transaction);
+                        await connection.ExecuteAsync("SET IDENTITY_INSERT StudentDebts OFF", transaction: transaction);
+                    }
+
+                    // שחזור Submissions (עם IDENTITY_INSERT)
+                    if (backup.Submissions.Count > 0)
+                    {
+                        await connection.ExecuteAsync("SET IDENTITY_INSERT Submissions ON", transaction: transaction);
+                        foreach (var sub in backup.Submissions)
+                            await connection.ExecuteAsync(@"
+                                INSERT INTO Submissions (SubmissionID, DebtID, StudentID, FilePath, UploadDate, FileName)
+                                VALUES (@SubmissionID, @DebtID, @StudentID, @FilePath, @UploadDate, @FileName)",
+                                sub, transaction: transaction);
+                        await connection.ExecuteAsync("SET IDENTITY_INSERT Submissions OFF", transaction: transaction);
+                    }
+
+                    transaction.Commit();
+                    return Ok(new { message = $"שחזור הושלם! {backup.Students.Count} תלמידות, {backup.Debts.Count} חובות, {backup.Submissions.Count} הגשות" });
+                }
+                catch
+                {
+                    transaction.Rollback();
+                    throw;
+                }
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "שגיאה בשחזור: " + ex.Message);
             }
         }
 

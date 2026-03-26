@@ -253,8 +253,8 @@ namespace CompletionBot.Server.Controllers
                 // יצירת קובץ PDF
                 var pdfBytes = GenerateReceiptPdf(request);
                 
-                // קבלת כתובות התשלום מ-appsettings
-                var recipients = _configuration.GetSection("AdminEmails:Recipients").Get<List<string>>() ?? new List<string>();
+                // קבלת כתובות לפרוט התשלום מ-appsettings
+                var recipients = _configuration.GetSection("PaymentEmails:Recipients").Get<List<string>>() ?? new List<string>();
                 
                 if (recipients.Count == 0)
                 {

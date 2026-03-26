@@ -26,8 +26,8 @@ namespace CompletionBot.Server.Controllers
 
         private const int MAX_QUOTA_HOURS = 300; // מכסת שעות רשות
         private const string SUPPORT_EMAIL = "botseminr@byta.org.il";
-        private const string ADDITIONAL_EMAIL_1 = "gila.y@byta.org.il";
-        private const string ADDITIONAL_EMAIL_2 = "admin@byta.org.il";
+        private const string ADDITIONAL_EMAIL_1 = "kroini.f@byta.org.il";
+        private const string ADDITIONAL_EMAIL_2 = "yocheved.b@byta.org.il";
 
         public ChatController(DbService dbService, IConfiguration config)
         {
@@ -199,14 +199,29 @@ public async Task<IActionResult> SendMessage([FromBody] ChatRequest request)
             };
         }).ToList();
 
-        // 5. שיחה רגילה (עדכון השליחה לבוט)
-        string systemPrompt;
+        // 5. שיחה רגילה (שליחה לבוט)
+        string systemInstr = BuildSystemInstruction(student, activePlanDebts, totalToPayNow);
+        string finalPrompt;
         if (isInitialLogin)
-            systemPrompt = BuildSmartSystemPrompt(student, activePlanDebts, "התלמידה נכנסה כעת למערכת.", true, totalToPayNow);
+        {
+            finalPrompt = systemInstr +
+                $"\n\nהנחיות לכניסה ראשונה:\n" +
+                $"1. פתחי בברכה לבבית ואדיבה ל{student.FirstName}.\n" +
+                "2. תני סקירה קצרה (עד 4 משפטים) על המצב: האם יש חובות פתוחים, האם שילמה, האם הגישה עבודות.\n" +
+                "3. הסבירי בקצרה שאת המזכירה הדיגיטלית לשירות ההשלמות.\n" +
+                "4. אל תפרטי שמות קורסים ספציפיים בשלב זה.";
+        }
         else
-            systemPrompt = BuildSmartSystemPrompt(student, activePlanDebts, request.UserMessage, false, totalToPayNow);
+        {
+            finalPrompt = systemInstr +
+                $"\n\nהנחיות להמשך שיחה:\n" +
+                "1. אל תפתחי ב'שלום' ואל תכתבי את שם התלמידה. עני ישר ולעניין.\n" +
+                "2. אם התלמידה השלימה חוב לאחרונה, ציינו זאת לטובה בטבעיות.\n" +
+                "3. אם התלמידה הקלידה שוב מספר זהות, הסבירי בנעימות שהיא כבר מחוברת.\n" +
+                $"שאלת התלמידה: \"{request.UserMessage}\"";
+        }
 
-        var aiReply = await GetSmartGeminiResponse(systemPrompt);
+        var aiReply = await GetSmartGeminiResponse(finalPrompt);
 
         if (aiReply.Contains("המערכת עמוסה"))
             return Ok(new BotResponse { Reply = aiReply, StudentId = student.StudentID });
@@ -351,85 +366,143 @@ private List<dynamic> FilterDebtsLogic(IEnumerable<dynamic> allDebts)
 
     return resultList;
 }
-       private string BuildSmartSystemPrompt(dynamic student, IEnumerable<dynamic> debts, string userMessage, bool isInitial, decimal totalAmount)
+       private string BuildSystemInstruction(dynamic student, IEnumerable<dynamic> debts, decimal totalAmount)
 {
     var debtsList = debts.ToList();
     var allRawData = new List<Dictionary<string, object?>>();
+    var recentlyCompleted = new List<string>();
 
     foreach (var debt in debtsList)
     {
         var fullRow = SafeConvertToDictionary(debt);
-        
-        // לוגיקה חדשה: זיהוי האם הקישור הוא הוראות בלבד (טקסט) או לינק להגשה (URL)
+
         string link = fullRow.ContainsKey("MaterialLink") ? fullRow["MaterialLink"]?.ToString() ?? "" : "";
-        bool isRealUrl = link.StartsWith("http") || link.StartsWith("www");
-        fullRow["IsInstructionsOnly"] = !string.IsNullOrEmpty(link) && !isRealUrl;
+        bool isRealUrl = link.StartsWith("http", StringComparison.OrdinalIgnoreCase) ||
+                         link.StartsWith("www", StringComparison.OrdinalIgnoreCase);
+        fullRow["IsInstructionsOnly"] = !string.IsNullOrEmpty(link.Trim()) && !isRealUrl;
 
         if (fullRow.ContainsKey("UploadDate") && fullRow["UploadDate"] != null)
         {
-            if (DateTime.TryParse(fullRow["UploadDate"]?.ToString(), out DateTime dt))
-                fullRow["AI_Readable_Date"] = dt.ToString("dd/MM/yyyy");
+            if (DateTime.TryParse(fullRow["UploadDate"]?.ToString(), out DateTime uploadDt))
+            {
+                fullRow["AI_Readable_Date"] = uploadDt.ToString("dd/MM/yyyy");
+                if ((DateTime.Now - uploadDt).TotalDays <= 7)
+                {
+                    string lessonName = fullRow.ContainsKey("LessonName") ? fullRow["LessonName"]?.ToString() ?? "" : "";
+                    if (!string.IsNullOrEmpty(lessonName))
+                        recentlyCompleted.Add(lessonName);
+                }
+            }
         }
         allRawData.Add(fullRow);
     }
 
     var contextData = new
     {
-        StudentName = student.FirstName, // שימוש בשם פרטי לפנייה נעימה
+        StudentID = student.StudentID,
+        StudentName = student.FirstName,
+        StudentLastName = student.LastName,
+        YearGroup = student.YearGroup,
+        StudentGroup = student.StudentGroup,
         FullDatabaseRecords = allRawData
     };
 
     string jsonString = JsonSerializer.Serialize(contextData, new JsonSerializerOptions { WriteIndented = true });
     var sb = new StringBuilder();
 
-    // --- 1. הגדרת זהות ועקרונות אישיות (החלק ה"אנושי") ---
-    sb.AppendLine("הגדרת תפקיד: את מזכירה אדיבה, מכבדת ומקצועית ב'בית המורה' (סמינר שצ'רנסקי).");
-    sb.AppendLine("סגנון שיחה: דברי בצורה טבעית, מגוונת ואנושית. אל תחזרי על נוסחים קבועים. התאימו את עצמך לסיטואציה של התלמידה.");
-    sb.AppendLine("שפה: עברית תקנית ונעימה. איסור מוחלט להשתמש במילה 'מכללה', רק 'בית המורה' או 'הסמינר'.");
-    sb.AppendLine("נושאים זרים: עני בנימוס שאת מסייעת רק בנושאי הלימודים במידה והתלמידה שואלת על נושאים אחרים.");
-
-    // --- 2. חוקי ברזל טכניים (מניעת סרבול) ---
+    // --- 1. זהות ותפקיד ---
+    sb.AppendLine("=== זהות ותפקיד ===");
+    sb.AppendLine("את מזכירה דיגיטלית אדיבה, חמה ומקצועית ב'בית המורה'.");
+    sb.AppendLine("סגנון שיחה: דברי בצורה טבעית, אנושית ומגוונת. כמו מזכירה טובה – קשובה, סבלנית, מכבדת ונותנת פידבק חיובי ומעודד.");
+    sb.AppendLine("שפה: עברית תקנית ונעימה. איסור מוחלט: אל תשתמשי במילה 'מכללה' – רק 'בית המורה' או 'הסמינר'.");
+    sb.AppendLine("נושאים זרים: אם נשאלת על נושא שאינו קשור להשלמות, השיבי בנעימות שאת מסייעת רק בנושאי ההשלמות הלימודיות.");
     sb.AppendLine("");
-    sb.AppendLine("!!! חוקי הגשה ותצוגה !!!");
-    sb.AppendLine("- איסור טבלאות: אל תשתמשי בסימנים כמו |---| או רשימות טכניות. השתמשי בפסקאות טבעיות.");
-    sb.AppendLine("- מניעת הכבדה: אל תצייני את שנת הלימודים, הקבוצה או מטרת הלימודים של התלמידה. זה מידע מיותר עבורה.");
-    sb.AppendLine("- דיוק בסטטוס: אם בשדה 'IsInstructionsOnly' מופיע True, המשמעות היא שהתלמידה רואה הנחיות לביצוע בלבד. אל תברכי אותה על הגשת העבודה!.");
 
-    // --- תוספת הנחיה למזכירה הדיגיטלית ---
-sb.AppendLine("!!! הנחיה קריטית לקורסי 'הוראות בלבד' !!!");
-sb.AppendLine("במידה ובשדה 'IsInstructionsOnly' מופיע True: אל תגידי לתלמידה 'הגשת' או 'סיימת'.");
-sb.AppendLine("הסבירי לה שעליה לבצע את ההוראות המופיעות בתיאור וליצור קשר עם הגורם האחראי כדי שהחוב ייסגר סופית.");
-
-    // --- 3. נתונים כספיים ---
+    // --- 2. סוגי קורסים – ידע מלא ---
+    sb.AppendLine("=== סוגי הקורסים במערכת ===");
+    sb.AppendLine("חשוב מאוד: לכל סוג קורס יש תהליך השלמה שונה. הכירי אותם היטב:");
     sb.AppendLine("");
-    sb.AppendLine("!!! נתון כספי !!!");
-    sb.AppendLine("-אל תכתבי בשום אופן סכום מדויק לתשלום זה שמור במזכירות!!!");
-    sb.AppendLine("- הנחיה: אם התלמידה טרם שילמה, הציגי זאת בעדינות כצעד ראשון והכרחי לפני השלמת העבודות בפועל. אבל אל תכתבי בשום אופן את הסכום לשתלום זה פרט שאת לא יודעת!!! ");
-
-    // --- 4. הזרקת נתוני המסד (JSON) ---
+    sb.AppendLine("קורס 'מתוקשב' (LessonType מכיל 'מתוקשב'):");
+    sb.AppendLine("  קורס אונליין שהתלמידה לומדת בפלטפורמה דיגיטלית (Google Classroom וכד'). שדה MaterialLink מכיל קישור לפלטפורמה.");
+    sb.AppendLine("  הנדרש: א) תשלום, ב) כניסה לקורס והשלמתו, ג) העלאת אישור סיום למערכת.");
+    sb.AppendLine("  קורסים אלו כפופים למכסת 300 שעות מצטברת.");
     sb.AppendLine("");
-    sb.AppendLine("--- נתוני התיק האישי מהמסד (JSON) ---");
+    sb.AppendLine("קורס 'מודרכת' (LessonType מכיל 'מודרכת'):");
+    sb.AppendLine("  קורס עם מדריך/מרצה מלווה. שדה MaterialLink מכיל פרטי יצירת קשר עם המרצה.");
+    sb.AppendLine("  הנדרש: א) תשלום, ב) תיאום שיעור עם המרצה לפי פרטי הקשר, ג) העלאת אישור ביצוע.");
+    sb.AppendLine("  גם קורסי מודרכת כפופים למכסת 300 השעות.");
+    sb.AppendLine("");
+    sb.AppendLine("קורס 'חובה' (LessonType מכיל 'חובה'):");
+    sb.AppendLine("  שיעורי חובה שהתלמידה נעדרה מהם. שדה MaterialLink מכיל קישור לחומר השיעור (הקלטה, מסמך וכד').");
+    sb.AppendLine("  הנדרש: א) תשלום, ב) צפייה/קריאה בחומר, ג) הגשת סיכום או אישור.");
+    sb.AppendLine("  קורסי חובה אינם כפופים למכסת 300 השעות – תמיד פתוחים להגשה.");
+    sb.AppendLine("");
+    sb.AppendLine("קורס 'עבודה מעשית' (LessonType מכיל 'עבודה מעשית'):");
+    sb.AppendLine("  עבודה מעשית (תפירה, הוראה, פרויקט וכו'). תשלום גבוה יחסית. שדה MaterialLink מכיל הנחיות לביצוע.");
+    sb.AppendLine("  הנדרש: א) תשלום, ב) ביצוע העבודה לפי ההנחיות, ג) הגשת תיעוד/קובץ.");
+    sb.AppendLine("  אינה כפופה למכסת 300 השעות.");
+    sb.AppendLine("");
+
+    // --- 3. תהליך התשלום ---
+    sb.AppendLine("=== תהליך התשלום ===");
+    sb.AppendLine("על כל חוב יש לשלם תחילה לפני שניתן להגיש. IsPaid=false = טרם שילמה.");
+    sb.AppendLine("התשלום מתבצע דרך כרטיס אשראי ישירות בממשק הבוט (כפתור 'לתשלום' שמופיע לתלמידה).");
+    sb.AppendLine("לאחר תשלום מוצלח: IsPaid מתעדכן ל-true אוטומטית.");
+    sb.AppendLine("חשוב: אל תציגי סכום מדויק לתשלום לתלמידה – הסכום מפורט בממשק התשלום עצמו.");
+    sb.AppendLine("אם תלמידה שואלת כמה לשלם: אמרי שהסכום מופיע בכפתור התשלום ומשתנה לפי הקורסים.");
+    sb.AppendLine("");
+
+    // --- 4. תהליך ההגשה ---
+    sb.AppendLine("=== תהליך ההגשה ===");
+    sb.AppendLine("לאחר תשלום, מופיע כפתור 'העלאת קובץ' לכל חוב. התלמידה מעלה קובץ (PDF, תמונה, Word וכו').");
+    sb.AppendLine("לאחר העלאה: IsSubmitted מתעדכן ל-true ושדה UploadDate מכיל את תאריך ההעלאה.");
+    sb.AppendLine("חוב 'הושלם' רק כאשר גם IsPaid=true וגם IsSubmitted=true, או כאשר IsExempt=true.");
+    sb.AppendLine("");
+
+    // --- 5. מקרים מיוחדים ---
+    sb.AppendLine("=== מקרים מיוחדים ===");
+    sb.AppendLine("IsInstructionsOnly=true: שדה MaterialLink מכיל טקסט/הוראות ולא קישור URL.");
+    sb.AppendLine("  → התלמידה צריכה לפעול לפי ההוראות ולפנות לגורם האחראי לסגירת החוב. אסור לומר לה 'הגשת' או 'סיימת'!");
+    sb.AppendLine("IsExempt=true: החוב פטור ידנית על ידי הנהלת הסמינר.");
+    sb.AppendLine("IsAllowedSubmission=false: החוב חרג ממכסת 300 השעות ואינו מחייב הגשה. אין לציין זאת לתלמידה אלא אם שואלת.");
+    sb.AppendLine("");
+    sb.AppendLine("חשוב מאוד – IsSubmitted כאשר IsAllowedSubmission=false:");
+    sb.AppendLine("  כאשר IsAllowedSubmission=false, ייתכן ש-IsSubmitted=true – אבל זה לא אומר שהתלמידה הגישה משהו!");
+    sb.AppendLine("  המשמעות היא שהקורס פטור מהגשה (חרג מהמכסה או קורס כפול). גם אם IsSubmitted=true על קורס כזה, אל תאמרי לתלמידה שהיא 'הגישה' אותו.");
+    sb.AppendLine("  לגבי תשלום: גם קורס עם IsAllowedSubmission=false עשוי לדרוש תשלום אם IsPaid=false. בדקי תמיד את IsPaid בנפרד.");
+    sb.AppendLine("");
+
+    // --- 6. מכסת 300 שעות ---
+    sb.AppendLine("=== מכסת 300 השעות ===");
+    sb.AppendLine("קורסי 'מתוקשב' ו'מודרכת' כפופים למכסה מצטברת של 300 שעות. מעל המכסה: IsAllowedSubmission=false.");
+    sb.AppendLine("אין לציין זאת לתלמידה באופן יזום. אם תשאל: הסבירי שרק חלק מהקורסים נדרשים להשלמה ושהמזכירות קבעה זאת.");
+    sb.AppendLine("");
+
+    // --- 7. קורסים שהושלמו לאחרונה ---
+    if (recentlyCompleted.Count > 0)
+    {
+        sb.AppendLine("=== השלמות אחרונות (7 ימים אחרונים) ===");
+        sb.AppendLine($"התלמידה השלימה לאחרונה את הקורסים הבאים: {string.Join(", ", recentlyCompleted)}");
+        sb.AppendLine("אם רלוונטי בהקשר השיחה, ציינו זאת בחמימות ובעידוד.");
+        sb.AppendLine("");
+    }
+
+    // --- 8. נתוני התיק האישי ---
+    sb.AppendLine("=== נתוני התיק האישי של התלמידה (JSON) ===");
     sb.AppendLine(jsonString);
-    sb.AppendLine("----------------------------------");
+    sb.AppendLine("==========================================");
+    sb.AppendLine("");
 
-    // --- 5. לוגיקת שיחה (פתיחה מול המשך) ---
-    if (isInitial)
-    {
-        sb.AppendLine("");
-        sb.AppendLine("הנחיות לכניסה ראשונה:");
-        sb.AppendLine($"1. פתחי בברכה לבבית ואדיבה ל{student.FirstName}.");
-        sb.AppendLine("2. תני סקירה קצרה עד 4 משפטים כללית, נעימה ויעילה על המצב והסבר קצרצר על תפקידך כמזכריה דיגיטלית להשלמת עבודות. אל תפרטי רשימות קורסים ארוכות או שמות קורסים או תאריכים מפורטים מיד בהתחלה.");
-        sb.AppendLine("3. הסבירי בקצרה שבאופן עקרוני לאחר הסדרת התשלום נוכל להתקדם להשלמת כל המטלות.");
-    }
-    else
-    {
-        sb.AppendLine("");
-        sb.AppendLine("!!! הנחיות להמשך שיחה !!!");
-        sb.AppendLine("1. איסור פנייה בשם: אל תכתבי 'שלום' או את שם התלמידה. עני ישר ולעניין.");
-        sb.AppendLine("2. זיהוי התקדמות: אם את מזהה בנתונים שהתלמידה השלימה חוב מאז הפעם האחרונה, צייני זאת לטובה בטבעיות.");
-        sb.AppendLine("3. טיפול בתעודת זהות: אם התלמידה הקלידה שוב מספר זהות, הסבירי לה בנעימות שהיא כבר מחוברת למערכת.");
-        sb.AppendLine($"שאלה אחרונה של התלמידה: \"{userMessage}\"");
-    }
+    // --- 9. כללי תצוגה ושיחה ---
+    sb.AppendLine("=== כללי תצוגה ושיחה ===");
+    sb.AppendLine("- אין טבלאות: אסור סימנים כמו |---| או גריד. השתמשי בפסקאות ומשפטים רציפים.");
+    sb.AppendLine("- אין כוכביות ** לעיצוב. כתבי בשפה ישירה וזורמת.");
+    sb.AppendLine("- אל תציגי שנת לימודים, קבוצה, או מטרת לימודים – מיותר לתלמידה.");
+    sb.AppendLine("- אורך תשובה: עד 4 משפטים. זהו כלל מחייב. אל תרחיבי יתר על המידה.");
+    sb.AppendLine("- אל תפרטי רשימות ארוכות: אם יש כמה חובות, ציינו בקצרה במשפט אחד ולא כרשימה.");
+    sb.AppendLine("- תמיד סיימי את התשובה במשפט שלם – לעולם לא באמצע מילה או משפט.");
+    sb.AppendLine("- בשיחה שוטפת: אל תפתחי ב'שלום' ואל תכתבי את שם התלמידה. עני ישר ולעניין.");
+    sb.AppendLine("- אם התלמידה הקלידה שוב מספר ת.ז.: הסבירי בנעימות שהיא כבר מחוברת.");
 
     return sb.ToString();
 }
@@ -443,7 +516,12 @@ sb.AppendLine("הסבירי לה שעליה לבצע את ההוראות המו�
                 try
                 {
                     var url = $"https://generativelanguage.googleapis.com/v1beta/models/{modelName}:generateContent?key={_apiKey}";
-                    var requestBody = new { contents = new[] { new { parts = new[] { new { text = prompt } } } }, generationConfig = new { temperature = 0.15, maxOutputTokens = 2048 } };
+
+                    var requestBody = new
+                    {
+                        contents = new[] { new { parts = new[] { new { text = prompt } } } },
+                        generationConfig = new { temperature = 0.15, maxOutputTokens = 4096 }
+                    };
                     var json = JsonSerializer.Serialize(requestBody);
                     var content = new StringContent(json, Encoding.UTF8, "application/json");
 
@@ -493,7 +571,7 @@ sb.AppendLine("הסבירי לה שעליה לבצע את ההוראות המו�
         </a>
     </div>";
 
-    string completionPrompt = $"התלמידה {student.FirstName} סיימה הכל כרגע. כתבי ברכה קצרה, מכבדת ומקצועית (2 משפטים) על הסיום ושהאישור נשלח למזכירות.";
+    string completionPrompt = $"את מזכירה אדיבה ב'בית המורה' (סמינר שצ'רנסקי). שפה: עברית תקנית, חמה ומכבדת. אל תשתמשי במילה 'מכללה'. אל תשתמשי בכוכביות לעיצוב.\n\nהתלמידה {student.FirstName} סיימה כעת את כל חובותיה הלימודיים בהצלחה. כתבי ברכה אישית ומכבדת בשני משפטים, וציינו שאישור הסיום נשלח למזכירות.";
     var aiReply = await GetSmartGeminiResponse(completionPrompt);
 
     return Ok(new BotResponse
@@ -729,8 +807,8 @@ private async Task SendCompletionCertificateEmailAsync(dynamic student, List<dyn
                     Timeout = 30000
                 };
 
-                // קריאת רשימת נמענים מהקונפיגורציה
-                var recipients = _config.GetSection("AdminEmails:Recipients").Get<List<string>>() ?? new List<string>();
+                // קריאת רשימת נמענים לאישור סיום לימודים
+                var recipients = _config.GetSection("CertificateEmails:Recipients").Get<List<string>>() ?? new List<string>();
                 
                 // התחזוקה - אם אין במידע, הוסף את ה-default
                 if (recipients == null || recipients.Count == 0)
